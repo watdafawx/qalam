@@ -2,7 +2,7 @@
 //! Windows silently removes a low-level hook that takes too long, so everything here stays quick.
 
 use crate::spell::Job;
-use crate::{FIXCARD_OPEN, WM_APP_FIXPICK, WM_APP_POPUP, dlog, lock, send::MAGIC, shared};
+use crate::{WM_APP_POPUP, dlog, lock, send::MAGIC, shared};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -54,7 +54,7 @@ fn notify_popup() {
     }
 }
 
-pub fn active() -> bool {
+fn active() -> bool {
     let s = shared();
     !s.paused.load(Ordering::Relaxed) && !s.disabled.load(Ordering::Relaxed) && !s.fullscreen.load(Ordering::Relaxed)
 }
@@ -216,7 +216,6 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             if k.dwExtraInfo != MAGIC && active() {
                 let msg = wparam.0 as u32;
                 if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                    CLICKS.fetch_add(1, Ordering::Relaxed); // typing cancels a pending hover menu
                     if on_key_down(k) {
                         EATEN.with_borrow_mut(|s| s.insert(k.vkCode));
                         return LRESULT(1);
@@ -239,18 +238,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 match msg {
                     WM_LBUTTONDOWN => {
                         if let Some(i) = hit_popup(m.pt) {
-                            if FIXCARD_OPEN.load(Ordering::Relaxed) {
-                                // Fix card under an underlined word: apply that fix.
-                                let h = shared().popup_hwnd.load(Ordering::Relaxed);
-                                let _ = PostMessageW(Some(HWND(h as _)), WM_APP_FIXPICK, WPARAM(i), LPARAM(0));
-                                EAT_MOUSE_UP.set(true);
-                                return LRESULT(1);
-                            }
                             run("click popup", |e, ctx| e.accept(i, ctx));
                             EAT_MOUSE_UP.set(true);
                             return LRESULT(1);
                         }
-                        CLICKS.fetch_add(1, Ordering::Relaxed);
                         reset("left click", false);
                         spell(Job::Dirty { hide: false });
                     }
@@ -259,7 +250,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         return LRESULT(1);
                     }
                     WM_RBUTTONDOWN => {
-                        CLICKS.fetch_add(1, Ordering::Relaxed);
                         reset("other click", false);
                     }
                     WM_MOUSEWHEEL | WM_MOUSEHWHEEL => spell(Job::Dirty { hide: true }),
@@ -271,9 +261,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         CallNextHookEx(None, code, wparam, lparam)
     }
 }
-
-/// Counts clicks and key presses, so a pending hover menu can tell the user did something meanwhile.
-pub static CLICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn hit_popup(p: POINT) -> Option<usize> {
     let items = lock(&shared().popup_items);

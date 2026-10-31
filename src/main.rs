@@ -46,110 +46,8 @@ pub const WM_APP_POPUP: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const WM_APP_FLASH: u32 = WM_APP + 3;
 pub const WM_APP_SQUIGGLES: u32 = WM_APP + 4;
-pub const WM_APP_FIXPICK: u32 = WM_APP + 8;
-/// The popup is showing fixes for an underlined word (instead of completions).
-pub static FIXCARD_OPEN: AtomicBool = AtomicBool::new(false);
-
-struct FixCard {
-    scan_id: u64,
-    id: usize,
-    word: String,
-    fixes: Vec<String>,
-    rect: RECT,
-    clicks: usize,
-}
-static FIXCARD: Mutex<Option<FixCard>> = Mutex::new(None);
 const TIMER_RELOAD: usize = 1;
 const TIMER_FLASH: usize = 2;
-const TIMER_SPELLHOVER: usize = 3;
-const HOVER_MS: u128 = 450;
-
-/// Hover tracking, polled on the UI thread (mouse-move events miss squiggles that appear under a resting mouse).
-#[derive(Default)]
-struct Hover {
-    /// Word box under the mouse, since when, and the click/key count then.
-    on: Option<(RECT, std::time::Instant, usize)>,
-    /// Card already shown for this word: don't reopen until the mouse leaves it.
-    done: Option<RECT>,
-    /// Polls in a row with the mouse away from an open card.
-    away: u32,
-}
-thread_local! {
-    static HOVER: std::cell::RefCell<Hover> = std::cell::RefCell::new(Hover::default());
-}
-
-/// Underlined word box (all its line rects merged) under `p`, with its ids.
-fn squiggle_at(p: POINT) -> Option<(u64, usize, RECT)> {
-    let s = lock(&shared().squiggles);
-    let hit = |r: &RECT| p.x >= r.left && p.x < r.right && p.y >= r.top - 2 && p.y < r.bottom + 4;
-    let q = s.items.iter().find(|q| q.rects.iter().any(hit))?;
-    let mut u = q.rects[0];
-    for r in &q.rects[1..] {
-        u.left = u.left.min(r.left);
-        u.top = u.top.min(r.top);
-        u.right = u.right.max(r.right);
-        u.bottom = u.bottom.max(r.bottom);
-    }
-    Some((s.scan_id, q.id, u))
-}
-
-unsafe fn hover_tick(hwnd: HWND) {
-    unsafe {
-        let mut cur = POINT::default();
-        let _ = GetCursorPos(&mut cur);
-        let clicks = hook::CLICKS.load(Ordering::Relaxed);
-        let near = |r: &RECT, m: i32| cur.x >= r.left - m && cur.x < r.right + m && cur.y >= r.top - m && cur.y < r.bottom + m;
-        let card = lock(&FIXCARD).as_ref().map(|c| (c.rect, c.clicks));
-        if let Some((word, opened_clicks)) = card {
-            let mut wr = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut wr);
-            // Word, card, and the strip between them all count as "still here".
-            let span = RECT { left: word.left.min(wr.left), top: word.top.min(wr.top), right: word.right.max(wr.right), bottom: word.bottom.max(wr.bottom) };
-            let here = near(&word, 6) || near(&wr, 8) || (near(&span, 0) && cur.x >= wr.left - 8 && cur.x < word.right.max(wr.left + 60));
-            let close = HOVER.with_borrow_mut(|h| {
-                h.away = if here { 0 } else { h.away + 1 };
-                if clicks != opened_clicks || h.away >= 3 {
-                    h.done = Some(word);
-                    h.on = None;
-                    true
-                } else {
-                    false
-                }
-            });
-            if close {
-                close_fixcard(hwnd);
-            }
-            return;
-        }
-        let hit = if hook::active() { squiggle_at(cur) } else { None };
-        let open = HOVER.with_borrow_mut(|h| {
-            let Some((scan_id, id, r)) = hit else {
-                h.on = None;
-                h.done = None;
-                return None;
-            };
-            if h.done.is_some_and(|d| near(&d, 4)) {
-                return None;
-            }
-            h.done = None;
-            match h.on {
-                Some((was, since, c)) if was == r && c == clicks => {
-                    if since.elapsed().as_millis() >= HOVER_MS {
-                        h.on = None;
-                        h.away = 0;
-                        return Some((scan_id, id));
-                    }
-                }
-                _ => h.on = Some((r, std::time::Instant::now(), clicks)),
-            }
-            None
-        });
-        if let Some((scan_id, id)) = open {
-            dlog(|| "hover fixes: open".into());
-            open_fixcard(hwnd, scan_id, id);
-        }
-    }
-}
 const FLASH_HOLD_MS: f32 = 250.0;
 const FLASH_FADE_MS: f32 = 280.0;
 const STATE_SYSTEM_PROTECTED: i32 = 0x2000_0000;
@@ -462,7 +360,6 @@ unsafe fn ui_main(note: Option<String>) {
         .expect("tray window");
 
         shared().popup_hwnd.store(popup.0 as isize, Ordering::Relaxed);
-        SetTimer(Some(popup), TIMER_SPELLHOVER, 100, None);
         TRAY_HWND.store(tray.0 as isize, Ordering::Relaxed);
         FLASH_WIN.set(Some(overlay::Layered::new()));
         SQUIG_WIN.set(Some(overlay::Layered::new()));
@@ -943,20 +840,12 @@ unsafe fn font_for(dpi: u32) -> HFONT {
 
 unsafe fn update_popup(hwnd: HWND) {
     unsafe {
-        let card = lock(&FIXCARD).as_ref().map(|c| {
-            let mut labels = c.fixes.clone();
-            labels.push(format!("Add '{}' to dictionary", c.word));
-            (labels, c.rect)
-        });
-        let view = match &card {
-            Some((labels, _)) => PopupView { labels: labels.clone(), selected: usize::MAX, nav: false },
-            None => {
-                let eng = lock(&shared().engine);
-                PopupView {
-                    labels: eng.suggestions.iter().map(|s| s.label.clone()).collect(),
-                    selected: eng.selected,
-                    nav: eng.nav,
-                }
+        let view = {
+            let eng = lock(&shared().engine);
+            PopupView {
+                labels: eng.suggestions.iter().map(|s| s.label.clone()).collect(),
+                selected: eng.selected,
+                nav: eng.nav,
             }
         };
         let s = shared();
@@ -967,10 +856,7 @@ unsafe fn update_popup(hwnd: HWND) {
             return;
         }
 
-        let (caret, source) = match card {
-            Some((_, r)) => (r, "word"),
-            None => caret::caret_rect(),
-        };
+        let (caret, source) = caret::caret_rect();
         dlog(|| format!("popup caret source={source}"));
         // No text caret anywhere (games, canvases): don't pop up over them.
         if source == "mouse" {
@@ -1109,24 +995,6 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
                 draw_squiggles();
                 LRESULT(0)
             }
-            WM_TIMER if wparam.0 == TIMER_SPELLHOVER => {
-                hover_tick(hwnd);
-                LRESULT(0)
-            }
-            WM_APP_FIXPICK => {
-                let card = lock(&FIXCARD).take();
-                FIXCARD_OPEN.store(false, Ordering::Relaxed);
-                if let Some(c) = card {
-                    if let Some(fix) = c.fixes.get(wparam.0) {
-                        hook::spell(spell::Job::Replace { scan_id: c.scan_id, id: c.id, text: fix.clone() });
-                    } else {
-                        lock(&shared().engine).learned.accept(&c.word);
-                        hook::spell(spell::Job::Dirty { hide: false });
-                    }
-                }
-                update_popup(hwnd);
-                LRESULT(0)
-            }
             WM_PAINT => {
                 paint(hwnd);
                 LRESULT(0)
@@ -1227,45 +1095,6 @@ fn draw_squiggles() {
         }
         w.show(ux, uy, &c, 255);
     });
-}
-
-/// Show the fixes for an underlined word in the popup, right under the word.
-unsafe fn open_fixcard(hwnd: HWND, scan_id: u64, id: usize) {
-    unsafe {
-        let (word, rect) = {
-            let s = lock(&shared().squiggles);
-            if s.scan_id != scan_id {
-                return;
-            }
-            match s.items.iter().find(|q| q.id == id) {
-                Some(q) => {
-                    let mut r = q.rects[0];
-                    for x in &q.rects[1..] {
-                        r.left = r.left.min(x.left);
-                        r.top = r.top.min(x.top);
-                        r.right = r.right.max(x.right);
-                        r.bottom = r.bottom.max(x.bottom);
-                    }
-                    (q.word.clone(), r)
-                }
-                None => return,
-            }
-        };
-        let fixes = lock(&shared().engine).fixes_for(&word, 4);
-        *lock(&FIXCARD) = Some(FixCard { scan_id, id, word, fixes, rect, clicks: hook::CLICKS.load(Ordering::Relaxed) });
-        FIXCARD_OPEN.store(true, Ordering::Relaxed);
-        update_popup(hwnd);
-    }
-}
-
-unsafe fn close_fixcard(hwnd: HWND) {
-    unsafe {
-        if lock(&FIXCARD).take().is_some() {
-            FIXCARD_OPEN.store(false, Ordering::Relaxed);
-            dlog(|| "fix card closed".into());
-            update_popup(hwnd);
-        }
-    }
 }
 
 /// Download + swap in an update on a worker thread, then quit so the new exe takes over.
