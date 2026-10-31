@@ -95,6 +95,8 @@ pub struct Engine {
     pub flash: Option<(usize, usize)>,
     /// Bumped whenever we lose track of the text left of the caret; a screen read for that epoch can restore it.
     pub epoch: u64,
+    /// Second opinion from the OS spell checker: true = the word is spelled right (don't fix or underline it).
+    pub system_knows: Option<Box<dyn Fn(&str, Lang) -> bool + Send>>,
 }
 
 fn is_word_char(c: char) -> bool {
@@ -125,6 +127,7 @@ impl Engine {
             all_selected: false,
             flash: None,
             epoch: 0,
+            system_knows: None,
         };
         e.set_config(cfg, secrets);
         e
@@ -192,7 +195,11 @@ impl Engine {
         if self.user_typos.contains_key(&k) || d.typos.contains_key(&k) {
             return true;
         }
-        !d.known(word) && self.learned.get(word) < LEARN_SUGGEST_MIN
+        !d.known(word) && self.learned.get(word) < LEARN_SUGGEST_MIN && !self.system_knows(word, d.lang)
+    }
+
+    fn system_knows(&self, word: &str, lang: Lang) -> bool {
+        self.system_knows.as_ref().is_some_and(|f| f(word, lang))
     }
 
     /// Spelling fixes for a word (right-click menu), best first.
@@ -532,6 +539,9 @@ impl Engine {
         if word.chars().count() < 4 || dict.known(word) || self.learned.get(&lower) >= LEARN_SUGGEST_MIN {
             return None;
         }
+        if self.system_knows(word, dict.lang) {
+            return None;
+        }
         let best = dict.fixes(word, &self.learned).into_iter().next()?;
         Some(match_case(word, &best))
     }
@@ -807,6 +817,16 @@ mod tests {
         let mut e = engine();
         typ(&mut e, "teh ");
         assert_eq!(e.flash.take(), Some((3, 1)));
+    }
+
+    #[test]
+    fn system_checker_vetoes_fixes() {
+        let mut e = engine();
+        typ(&mut e, "toggel ");
+        e.flash = None;
+        e.system_knows = Some(Box::new(|w, _| w == "toggle"));
+        assert!(e.correction("toggle", Ctx::default()).is_none(), "OS knows it: leave it");
+        assert!(!e.misspelled("toggle"));
     }
 
     #[test]

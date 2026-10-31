@@ -2,6 +2,7 @@
 //! qalam: system-wide word suggestions, autocorrect and text replacement.
 //! Threads: `hooks` (keyboard/mouse hooks + engine), `sender` (SendInput), main (popup, tray, focus tracking).
 
+mod winspell;
 mod apps;
 mod caret;
 mod editor;
@@ -257,7 +258,8 @@ fn main() {
     });
     let learned = std::fs::read_to_string(config::learned_path()).map(|t| Learned::parse(&t)).unwrap_or_default();
     let newline_enter = cfg.general.newline.eq_ignore_ascii_case("enter");
-    let engine = Engine::new(learned, cfg, config::extra_replacements());
+    let mut engine = Engine::new(learned, cfg, config::extra_replacements());
+    engine.system_knows = Some(Box::new(winspell::knows));
 
     let _ = SHARED.set(Shared {
         engine: Mutex::new(engine),
