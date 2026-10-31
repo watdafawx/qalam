@@ -23,6 +23,10 @@ pub fn caret_rect() -> (RECT, &'static str) {
             LAST.set((fg.0 as isize, r));
             return (r, src);
         }
+        if let Some(r) = uia_caret() {
+            LAST.set((fg.0 as isize, r));
+            return (r, "uia");
+        }
         let (h, r) = LAST.get();
         if h == fg.0 as isize && r.bottom > r.top {
             return (r, "last");
@@ -61,5 +65,51 @@ unsafe fn query(fg: HWND) -> Option<(RECT, &'static str)> {
             return None;
         }
         Some((RECT { left: x, top: y, right: x + w.max(1), bottom: y + h }, "msaa"))
+    }
+}
+
+thread_local! {
+    static UIA: std::cell::RefCell<Option<windows::Win32::UI::Accessibility::IUIAutomation>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Caret via UI Automation (Chromium/Electron apps that don't expose the classic caret).
+fn uia_caret() -> Option<RECT> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+    use windows::Win32::UI::Accessibility::*;
+    unsafe {
+        let auto = UIA.with_borrow_mut(|u| {
+            if u.is_none() {
+                *u = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
+            }
+            u.clone()
+        })?;
+        let el = auto.GetFocusedElement().ok()?;
+        let tp2: IUIAutomationTextPattern2 = el.GetCurrentPatternAs(UIA_TextPattern2Id).ok()?;
+        let mut active = windows::core::BOOL(0);
+        let caret = tp2.GetCaretRange(&mut active).ok()?;
+        // A collapsed range often has no rectangle: measure the character before the caret.
+        let r = caret.Clone().ok()?;
+        let _ = r.MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -1);
+        let psa = r.GetBoundingRectangles().ok()?;
+        if psa.is_null() {
+            return None;
+        }
+        use windows::Win32::System::Ole::*;
+        let mut out = None;
+        if let (Ok(lb), Ok(ub)) = (SafeArrayGetLBound(psa, 1), SafeArrayGetUBound(psa, 1)) {
+            let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+            if ub - lb + 1 >= 4 && SafeArrayAccessData(psa, &mut data).is_ok() {
+                let v = std::slice::from_raw_parts(data as *const f64, (ub - lb + 1) as usize);
+                let n = v.len() / 4 * 4;
+                let c = &v[n - 4..n]; // last line's rect
+                if c[3] > 0.0 {
+                    let right = (c[0] + c[2]) as i32;
+                    out = Some(RECT { left: right, top: c[1] as i32, right: right + 1, bottom: (c[1] + c[3]) as i32 });
+                }
+                let _ = SafeArrayUnaccessData(psa);
+            }
+        }
+        let _ = SafeArrayDestroy(psa);
+        out
     }
 }

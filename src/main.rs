@@ -11,6 +11,7 @@ mod install;
 mod overlay;
 mod send;
 mod spell;
+mod update;
 
 use install::autostart;
 
@@ -69,6 +70,21 @@ const MENU_UNDERLINE: usize = 25;
 const MENU_AR_AUTOCORRECT: usize = 26;
 const MENU_APPS: usize = 27;
 const MENU_TOGGLE_APP: usize = 28;
+const MENU_UPDATE: usize = 29;
+const MENU_CHECK_UPDATE: usize = 30;
+const MENU_AUTO_UPDATE: usize = 31;
+const WM_APP_UPDATE: u32 = WM_APP + 6;
+pub const UPDATE_FOUND: usize = 1;
+pub const UPDATE_NONE: usize = 2;
+pub const UPDATE_ERROR: usize = 3;
+
+/// From the update thread to the tray window.
+pub fn post_update_event(kind: usize) {
+    let h = TRAY_HWND.load(Ordering::Relaxed);
+    unsafe {
+        let _ = PostMessageW(Some(HWND(h as _)), WM_APP_UPDATE, WPARAM(kind), LPARAM(0));
+    }
+}
 
 /// Last app (exe name) that had focus, other than qalam itself, for the tray's "Turn off in ..." item.
 static LAST_APP: Mutex<String> = Mutex::new(String::new());
@@ -99,12 +115,16 @@ pub struct Shared {
     pub disabled: AtomicBool,
     /// Foreground app is in replacements_only_apps (terminals): text replacement only.
     pub replacements_only: AtomicBool,
+    /// Foreground window is fullscreen (game/video) and disable_in_fullscreen is on.
+    pub fullscreen: AtomicBool,
     pub paused: AtomicBool,
     pub newline_enter: AtomicBool,
     pub spell_tx: Mutex<Sender<spell::Job>>,
     pub squiggles: Mutex<spell::Squiggles>,
     /// Screen rect of the word to flash after an autocorrect.
     pub flash_rect: Mutex<Option<RECT>>,
+    /// A newer release found on GitHub.
+    pub update: Mutex<Option<update::Update>>,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -203,7 +223,11 @@ fn main() {
     // Earlier builds were called "typeahead": bring their settings over and drop their startup entry.
     config::migrate_old_name();
     autostart::remove_legacy();
-    let after_install = has("--after-install");
+    let after_update = has("--after-update");
+    let after_install = has("--after-install") || after_update;
+    if after_update {
+        update::cleanup();
+    }
     if !single_instance(after_install) {
         // Already running: launching again opens the Replacements window there.
         unsafe {
@@ -244,17 +268,26 @@ fn main() {
         password: AtomicBool::new(false),
         disabled: AtomicBool::new(false),
         replacements_only: AtomicBool::new(false),
+        fullscreen: AtomicBool::new(false),
         paused: AtomicBool::new(false),
         newline_enter: AtomicBool::new(newline_enter),
         spell_tx: Mutex::new(spell::spawn()),
         squiggles: Mutex::new(spell::Squiggles::default()),
         flash_rect: Mutex::new(None),
+        update: Mutex::new(None),
     });
     if std::env::var_os("QALAM_DEBUG").is_some() {
         set_debug(true);
     }
 
-    unsafe { ui_main(after_install) };
+    let note = if after_update {
+        Some(format!("Updated to v{}.", env!("CARGO_PKG_VERSION")))
+    } else if after_install {
+        Some("Installed. qalam starts with Windows; click the tray icon to add replacements.".to_string())
+    } else {
+        None
+    };
+    unsafe { ui_main(note) };
 }
 
 // ---------- UI thread ----------
@@ -272,7 +305,7 @@ thread_local! {
     static FONT: std::cell::Cell<(u32, isize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-unsafe fn ui_main(after_install: bool) {
+unsafe fn ui_main(note: Option<String>) {
     unsafe {
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
 
@@ -347,12 +380,10 @@ unsafe fn ui_main(after_install: bool) {
         on_foreground(GetForegroundWindow());
 
         hook::spawn();
-        if after_install {
-            tray_icon(
-                tray,
-                NIM_MODIFY,
-                Some("Installed. qalam starts with Windows; click the tray icon to add replacements."),
-            );
+        update::cleanup();
+        update::spawn();
+        if let Some(n) = note {
+            tray_icon(tray, NIM_MODIFY, Some(&n));
         }
 
         let mut msg = MSG::default();
@@ -472,6 +503,7 @@ fn on_foreground(hwnd: HWND) {
     }
     s.disabled.store(disabled, Ordering::Relaxed);
     s.replacements_only.store(repl_only, Ordering::Relaxed);
+    update_fullscreen(hwnd);
     s.password.store(false, Ordering::Relaxed);
     if !ours {
         hook::spell(spell::Job::Dirty { hide: true });
@@ -499,6 +531,7 @@ unsafe extern "system" fn win_event(
             // The foreground window moved or resized: squiggles are in the wrong place until the next scan.
             if id_object == OBJID_WINDOW.0 && hwnd == GetForegroundWindow() {
                 hook::spell(spell::Job::Dirty { hide: true });
+                update_fullscreen(hwnd);
             }
             return;
         }
@@ -560,6 +593,28 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 }
                 LRESULT(0)
             }
+            WM_APP_UPDATE => {
+                match wparam.0 {
+                    UPDATE_FOUND => {
+                        let u = lock(&shared().update).clone();
+                        let auto = lock(&shared().engine).cfg.general.auto_update;
+                        if let Some(u) = u {
+                            if auto && !update::is_dev_build() {
+                                install_update(hwnd, &u);
+                            } else {
+                                let t = format!("qalam {} is available. Right-click the tray icon > Update.", u.version);
+                                tray_icon(hwnd, NIM_MODIFY, Some(&t));
+                            }
+                        }
+                    }
+                    UPDATE_NONE => {
+                        let t = format!("You're on the latest version (v{}).", env!("CARGO_PKG_VERSION"));
+                        tray_icon(hwnd, NIM_MODIFY, Some(&t));
+                    }
+                    _ => tray_icon(hwnd, NIM_MODIFY, Some("Couldn't check for updates (offline?).")),
+                }
+                LRESULT(0)
+            }
             WM_APP_TRAY => {
                 let ev = (lparam.0 & 0xFFFF) as u32;
                 if ev == WM_LBUTTONUP {
@@ -595,6 +650,15 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                     }
                     MENU_EDITOR => editor::open(),
                     MENU_APPS => apps::open(),
+                    MENU_UPDATE => {
+                        if let Some(u) = lock(&shared().update).clone() {
+                            install_update(hwnd, &u);
+                        }
+                    }
+                    MENU_CHECK_UPDATE => {
+                        std::thread::spawn(|| update::check_now(true));
+                    }
+                    MENU_AUTO_UPDATE => toggle_bool(hwnd, "auto_update", |g| g.auto_update),
                     MENU_TOGGLE_APP => {
                         let app = lock(&LAST_APP).clone();
                         if !app.is_empty() {
@@ -686,6 +750,11 @@ unsafe fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(sub, check(kb), MENU_KBMODE, w!("Only the keyboard layout's language"));
             let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Languages"));
         }
+        if let Some(u) = lock(&shared().update).clone() {
+            let t = wide(&format!("Update to {}", u.version));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_UPDATE, PCWSTR(t.as_ptr()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        }
         let _ = AppendMenuW(menu, MF_STRING, MENU_APPS, w!("Apps..."));
         let last = lock(&LAST_APP).clone();
         if !last.is_empty() {
@@ -704,6 +773,9 @@ unsafe fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, MENU_FOLDER, w!("Open data folder"));
         let _ = AppendMenuW(menu, if autostart::enabled() { MF_CHECKED } else { MF_UNCHECKED }, MENU_AUTOSTART, w!("Start with Windows"));
         let _ = AppendMenuW(menu, if debug_on() { MF_CHECKED } else { MF_UNCHECKED }, MENU_DEBUG, w!("Debug log (no typed text)"));
+        let _ = AppendMenuW(menu, check(g.auto_update), MENU_AUTO_UPDATE, w!("Update automatically"));
+        let ver = wide(&format!("Check for updates (v{})", env!("CARGO_PKG_VERSION")));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_CHECK_UPDATE, PCWSTR(ver.as_ptr()));
         if !install::is_installed_copy() && !config::portable() {
             let _ = AppendMenuW(menu, MF_STRING, MENU_INSTALL, w!("Install for this user..."));
         }
@@ -783,6 +855,12 @@ unsafe fn update_popup(hwnd: HWND) {
         }
 
         let (caret, source) = caret::caret_rect();
+        // No text caret anywhere (games, canvases): don't pop up over them.
+        if source == "mouse" {
+            lock(&s.popup_items).clear();
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            return;
+        }
         let anchor = POINT { x: caret.left, y: caret.bottom };
         let mon = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
         let (mut dx, mut dy) = (96u32, 96u32);
@@ -1059,5 +1137,61 @@ unsafe fn spell_menu(id: usize, scan_id: u64) {
             lock(&shared().engine).learned.accept(&word);
             hook::spell(spell::Job::Dirty { hide: false });
         }
+    }
+}
+
+/// Download + swap in an update on a worker thread, then quit so the new exe takes over.
+fn install_update(tray: HWND, u: &update::Update) {
+    let u = u.clone();
+    let tray_raw = tray.0 as isize;
+    unsafe { tray_icon(tray, NIM_MODIFY, Some(&format!("Updating to {}...", u.version))) };
+    std::thread::spawn(move || {
+        let tray = HWND(tray_raw as _);
+        match update::apply(&u) {
+            Ok(()) => unsafe {
+                let _ = PostMessageW(Some(tray), WM_COMMAND, WPARAM(MENU_QUIT), LPARAM(0));
+            },
+            Err(e) => {
+                dlog(|| format!("update failed: {e}"));
+                unsafe { tray_icon(tray, NIM_MODIFY, Some(&format!("Update failed: {e}"))) };
+            }
+        }
+    });
+}
+
+/// Does `hwnd` cover its whole monitor (exclusive or borderless fullscreen)? Desktop/shell windows don't count.
+fn is_fullscreen(hwnd: HWND) -> bool {
+    unsafe {
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let class = class_name(hwnd);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Windows.UI.Core.CoreWindow") {
+            return false;
+        }
+        let mut wr = RECT::default();
+        if GetWindowRect(hwnd, &mut wr).is_err() {
+            return false;
+        }
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom
+    }
+}
+
+fn update_fullscreen(hwnd: HWND) {
+    let s = shared();
+    let on = lock(&s.engine).cfg.general.disable_in_fullscreen;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let fs = on && pid != std::process::id() && is_fullscreen(hwnd);
+    if s.fullscreen.swap(fs, Ordering::Relaxed) != fs {
+        dlog(|| format!("fullscreen={fs}"));
+        lock(&s.engine).reset(false);
+        refresh_popup();
     }
 }

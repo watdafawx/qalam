@@ -31,6 +31,8 @@ language_mode = "all"
 autocorrect_languages = ["en"]   # Arabic is suggestions/underlines only unless you add "ar"
 arabizi = false                  # suggest Arabic for Arabizi ("mar7aba" -> مرحبا)
 
+disable_in_fullscreen = true     # off while a fullscreen app (games, video) is in front
+auto_update = true               # install new releases from GitHub automatically (checked at start + every 12 h)
 highlight_corrections = true     # flash the corrected word briefly
 underline_misspelled = true      # squiggly lines under unknown words (apps with UI Automation text support)
 underline_skip_apps = []         # e.g. apps that already have their own spell check
@@ -72,6 +74,8 @@ pub struct General {
     pub autocorrect_languages: Vec<String>,
     pub arabizi: bool,
     pub highlight_corrections: bool,
+    pub auto_update: bool,
+    pub disable_in_fullscreen: bool,
     pub underline_misspelled: bool,
     pub underline_skip_apps: Vec<String>,
     pub replacements_only_apps: Vec<String>,
@@ -95,6 +99,8 @@ impl Default for General {
             autocorrect_languages: vec!["en".into()],
             arabizi: false,
             highlight_corrections: true,
+            auto_update: true,
+            disable_in_fullscreen: true,
             underline_misspelled: true,
             underline_skip_apps: vec![],
             replacements_only_apps: vec!["WindowsTerminal.exe".into(), "OpenConsole.exe".into(), "conhost.exe".into(), "cmd.exe".into(), "powershell.exe".into(), "pwsh.exe".into(), "wezterm-gui.exe".into(), "alacritty.exe".into(), "mintty.exe".into(), "Tabby.exe".into(), "Hyper.exe".into(), "putty.exe".into(), "kitty.exe".into()],

@@ -68,6 +68,7 @@ fn underline_on() -> bool {
     let s = shared();
     !s.paused.load(Ordering::Relaxed)
         && !s.disabled.load(Ordering::Relaxed)
+        && !s.fullscreen.load(Ordering::Relaxed)
         && !s.replacements_only.load(Ordering::Relaxed)
         && lock(&s.engine).cfg.general.underline_misspelled
 }
@@ -348,7 +349,7 @@ fn scan(auto: &IUIAutomation) -> Option<(Vec<Squiggle>, Vec<IUIAutomationTextRan
         let vis = tp.GetVisibleRanges().ok()?;
         let n = vis.Length().ok()?.min(4);
         let (caret, caret_src) = caret::caret_rect();
-        let caret_known = caret_src == "win32" || caret_src == "msaa";
+        let caret_known = matches!(caret_src, "win32" | "msaa" | "uia");
         let mut items = Vec::new();
         let mut ranges = Vec::new();
         for i in 0..n {

@@ -57,7 +57,7 @@ fn notify_popup() {
 
 fn active() -> bool {
     let s = shared();
-    !s.paused.load(Ordering::Relaxed) && !s.disabled.load(Ordering::Relaxed)
+    !s.paused.load(Ordering::Relaxed) && !s.disabled.load(Ordering::Relaxed) && !s.fullscreen.load(Ordering::Relaxed)
 }
 
 /// What the engine said, after forwarding any text to type.

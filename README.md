@@ -47,6 +47,10 @@ Turn off Windows' own "Show text suggestions when typing on the physical keyboar
   Chrome/Edge, Discord and other Electron apps, Notepad, Word; not in games or most terminals. Apps that already
   underline (e.g. Discord with its spell check on) can go in `underline_skip_apps`.
 
+- **Games**: qalam turns itself off while a fullscreen app is in front, and never pops up where there's no text caret.
+- **Updates**: checks GitHub releases at start and every 12 h, verifies the download's SHA-256 and swaps itself in
+  ("Update automatically" in the tray; turn it off to just get a notice). "Check for updates" checks now.
+
 ## Languages
 
 - English and Arabic (العربية). By default every enabled language is used at once, picked by the script you type in.
