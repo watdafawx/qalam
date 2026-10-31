@@ -31,6 +31,9 @@ arabizi = false                  # suggest Arabic for Arabizi ("mar7aba" -> مر
 highlight_corrections = true     # flash the corrected word briefly
 underline_misspelled = true      # squiggly lines under unknown words (apps with UI Automation text support)
 underline_skip_apps = []         # e.g. apps that already have their own spell check
+# Apps where only text replacement runs: no popup, autocorrect, underlines or learning (terminals, by default),
+# so keys like Up/Tab/Enter always reach the app.
+replacements_only_apps = ["WindowsTerminal.exe", "OpenConsole.exe", "conhost.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "wezterm-gui.exe", "alacritty.exe", "mintty.exe", "Tabby.exe", "Hyper.exe", "putty.exe", "kitty.exe"]
 
 # Your own autocorrect fixes (wrong = "right"), on top of the built-in list.
 [autocorrect]
@@ -66,6 +69,7 @@ pub struct General {
     pub highlight_corrections: bool,
     pub underline_misspelled: bool,
     pub underline_skip_apps: Vec<String>,
+    pub replacements_only_apps: Vec<String>,
 }
 
 impl Default for General {
@@ -86,6 +90,7 @@ impl Default for General {
             highlight_corrections: true,
             underline_misspelled: true,
             underline_skip_apps: vec![],
+            replacements_only_apps: vec!["WindowsTerminal.exe".into(), "OpenConsole.exe".into(), "conhost.exe".into(), "cmd.exe".into(), "powershell.exe".into(), "pwsh.exe".into(), "wezterm-gui.exe".into(), "alacritty.exe".into(), "mintty.exe".into(), "Tabby.exe".into(), "Hyper.exe".into(), "putty.exe".into(), "kitty.exe".into()],
         }
     }
 }

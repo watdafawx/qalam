@@ -68,6 +68,7 @@ fn underline_on() -> bool {
     let s = shared();
     !s.paused.load(Ordering::Relaxed)
         && !s.disabled.load(Ordering::Relaxed)
+        && !s.replacements_only.load(Ordering::Relaxed)
         && lock(&s.engine).cfg.general.underline_misspelled
 }
 

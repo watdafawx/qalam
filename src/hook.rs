@@ -63,7 +63,9 @@ fn active() -> bool {
 /// What the engine said, after forwarding any text to type.
 fn run(what: &str, f: impl FnOnce(&mut qalam::engine::Engine, Ctx) -> Action) -> bool {
     let s = shared();
-    let ctx = Ctx { password: s.password.load(Ordering::Relaxed), kb_lang: KB_LANG.get() };
+    // Password boxes and terminals both mean "replacements only".
+    let restricted = s.password.load(Ordering::Relaxed) || s.replacements_only.load(Ordering::Relaxed);
+    let ctx = Ctx { password: restricted, kb_lang: KB_LANG.get() };
     let (action, changed, flash, lost) = {
         let mut eng = lock(&s.engine);
         let before = eng.popup_version;

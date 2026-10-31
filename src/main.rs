@@ -91,6 +91,8 @@ pub struct Shared {
     pub popup_items: Mutex<Vec<RECT>>,
     pub password: AtomicBool,
     pub disabled: AtomicBool,
+    /// Foreground app is in replacements_only_apps (terminals): text replacement only.
+    pub replacements_only: AtomicBool,
     pub paused: AtomicBool,
     pub newline_enter: AtomicBool,
     pub spell_tx: Mutex<Sender<spell::Job>>,
@@ -235,6 +237,7 @@ fn main() {
         popup_items: Mutex::new(Vec::new()),
         password: AtomicBool::new(false),
         disabled: AtomicBool::new(false),
+        replacements_only: AtomicBool::new(false),
         paused: AtomicBool::new(false),
         newline_enter: AtomicBool::new(newline_enter),
         spell_tx: Mutex::new(spell::spawn()),
@@ -440,12 +443,15 @@ fn on_foreground(hwnd: HWND) {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let ours = pid == std::process::id();
-    let (disabled, epoch) = {
+    let (disabled, repl_only, epoch) = {
         let mut eng = lock(&s.engine);
         eng.reset(false);
-        (ours || eng.cfg.general.disabled_apps.iter().any(|a| a.eq_ignore_ascii_case(&name)), eng.epoch)
+        let g = &eng.cfg.general;
+        let listed = |l: &[String]| l.iter().any(|a| a.eq_ignore_ascii_case(&name));
+        (ours || listed(&g.disabled_apps), listed(&g.replacements_only_apps), eng.epoch)
     };
     s.disabled.store(disabled, Ordering::Relaxed);
+    s.replacements_only.store(repl_only, Ordering::Relaxed);
     s.password.store(false, Ordering::Relaxed);
     if !ours {
         hook::spell(spell::Job::Dirty { hide: true });
