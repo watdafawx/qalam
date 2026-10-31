@@ -2,7 +2,7 @@
 //! Windows silently removes a low-level hook that takes too long, so everything here stays quick.
 
 use crate::spell::Job;
-use crate::{WM_APP_POPUP, WM_APP_SPELLMENU, dlog, lock, send::MAGIC, shared};
+use crate::{WM_APP_POPUP, WM_APP_SPELLCLICK, WM_APP_SPELLMENU, dlog, lock, send::MAGIC, shared};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -17,6 +17,8 @@ thread_local! {
     static EATEN: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     static EAT_MOUSE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static EAT_RMOUSE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Left button went down on an underlined word here.
+    static SQUIGGLE_DOWN: std::cell::Cell<Option<POINT>> = const { std::cell::Cell::new(None) };
     /// Language of the foreground keyboard layout, updated on every key.
     static KB_LANG: std::cell::Cell<Option<Lang>> = const { std::cell::Cell::new(None) };
 }
@@ -243,6 +245,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                             EAT_MOUSE_UP.set(true);
                             return LRESULT(1);
                         }
+                        CLICKS.fetch_add(1, Ordering::Relaxed);
+                        SQUIGGLE_DOWN.set(hit_squiggle(m.pt).map(|_| m.pt));
                         reset("left click", false);
                         spell(Job::Dirty { hide: false });
                     }
@@ -250,7 +254,19 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         EAT_MOUSE_UP.set(false);
                         return LRESULT(1);
                     }
+                    WM_LBUTTONUP => {
+                        // Plain click (no drag) on an underlined word: show fixes, unless it turns into a double-click.
+                        if let Some(d) = SQUIGGLE_DOWN.take()
+                            && (d.x - m.pt.x).abs() <= 4
+                            && (d.y - m.pt.y).abs() <= 4
+                        {
+                            let h = shared().popup_hwnd.load(Ordering::Relaxed);
+                            let pt = ((m.pt.x as u32 as u64) << 32 | m.pt.y as u32 as u64) as isize;
+                            let _ = PostMessageW(Some(HWND(h as _)), WM_APP_SPELLCLICK, WPARAM(CLICKS.load(Ordering::Relaxed)), LPARAM(pt));
+                        }
+                    }
                     WM_RBUTTONDOWN => {
+                        CLICKS.fetch_add(1, Ordering::Relaxed);
                         if let Some((scan_id, id)) = hit_squiggle(m.pt) {
                             // Right-click on an underlined word: show fixes.
                             let h = shared().popup_hwnd.load(Ordering::Relaxed);
@@ -274,7 +290,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
-fn hit_squiggle(p: POINT) -> Option<(u64, usize)> {
+/// Counts mouse-button presses, so a pending click-to-fix can tell a double-click happened.
+pub static CLICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn hit_squiggle(p: POINT) -> Option<(u64, usize)> {
     let s = lock(&shared().squiggles);
     s.items
         .iter()

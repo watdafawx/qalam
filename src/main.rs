@@ -47,8 +47,12 @@ const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const WM_APP_FLASH: u32 = WM_APP + 3;
 pub const WM_APP_SQUIGGLES: u32 = WM_APP + 4;
 pub const WM_APP_SPELLMENU: u32 = WM_APP + 5;
+pub const WM_APP_SPELLCLICK: u32 = WM_APP + 7;
 const TIMER_RELOAD: usize = 1;
 const TIMER_FLASH: usize = 2;
+const TIMER_SPELLCLICK: usize = 3;
+/// Left-click on an underlined word waiting out the double-click time: (click count, point).
+static PENDING_CLICK: Mutex<Option<(usize, POINT)>> = Mutex::new(None);
 const FLASH_HOLD_MS: f32 = 250.0;
 const FLASH_FADE_MS: f32 = 280.0;
 const STATE_SYSTEM_PROTECTED: i32 = 0x2000_0000;
@@ -998,6 +1002,25 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
             }
             WM_APP_SPELLMENU => {
                 spell_menu(wparam.0, lparam.0 as u64);
+                LRESULT(0)
+            }
+            WM_APP_SPELLCLICK => {
+                let v = lparam.0 as u64;
+                let pt = POINT { x: (v >> 32) as u32 as i32, y: v as u32 as i32 };
+                *lock(&PENDING_CLICK) = Some((wparam.0, pt));
+                SetTimer(Some(hwnd), TIMER_SPELLCLICK, windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime(), None);
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == TIMER_SPELLCLICK => {
+                let _ = KillTimer(Some(hwnd), TIMER_SPELLCLICK);
+                let pending = lock(&PENDING_CLICK).take();
+                // Skip if another click came in (double-click selects the word instead).
+                if let Some((clicks, pt)) = pending
+                    && clicks == hook::CLICKS.load(Ordering::Relaxed)
+                    && let Some((scan_id, id)) = hook::hit_squiggle(pt)
+                {
+                    spell_menu(id, scan_id);
+                }
                 LRESULT(0)
             }
             WM_PAINT => {
