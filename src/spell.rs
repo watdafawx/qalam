@@ -272,7 +272,7 @@ fn flash_rect(auto: &IUIAutomation, word: usize, sep: usize) -> Option<RECT> {
     }
     // Estimate from the caret: average character ~0.5 × line height.
     let (c, src) = caret::caret_rect();
-    if src == "mouse" || src == "last" {
+    if matches!(src, "mouse" | "last" | "browser") {
         return None;
     }
     let h = (c.bottom - c.top).max(8) as f32;

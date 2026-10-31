@@ -33,7 +33,45 @@ pub fn caret_rect() -> (RECT, &'static str) {
         }
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
-        (RECT { left: p.x, top: p.y, right: p.x + 1, bottom: p.y + 20 }, "mouse")
+        let r = RECT { left: p.x, top: p.y, right: p.x + 1, bottom: p.y + 20 };
+        // Browsers hide their caret until accessibility wakes up; they're text apps, so still show the popup.
+        if is_browser(fg) {
+            wake_accessibility(fg);
+            return (r, "browser");
+        }
+        (r, "mouse")
+    }
+}
+
+fn class_name(h: HWND) -> String {
+    let mut buf = [0u16; 128];
+    let n = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(h, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// Chromium (Chrome, Edge, Brave, Electron) and Firefox top-level windows.
+pub fn is_browser(h: HWND) -> bool {
+    let c = class_name(h);
+    c.starts_with("Chrome_WidgetWin") || c == "MozillaWindowClass"
+}
+
+/// Chromium turns on its accessibility tree (and with it the caret) when a client asks for it.
+/// Asking for the client object of the window and its render widget is enough.
+pub fn wake_accessibility(top: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, OBJID_CLIENT};
+    use windows::core::w;
+    unsafe {
+        let ask = |h: HWND| {
+            let mut raw: *mut c_void = std::ptr::null_mut();
+            if AccessibleObjectFromWindow(h, OBJID_CLIENT.0 as u32, &IAccessible::IID, &mut raw).is_ok() && !raw.is_null() {
+                let acc = IAccessible::from_raw(raw);
+                let _ = acc.accChildCount();
+            }
+        };
+        ask(top);
+        if let Ok(rw) = FindWindowExW(Some(top), None, w!("Chrome_RenderWidgetHostHWND"), None) {
+            ask(rw);
+        }
     }
 }
 

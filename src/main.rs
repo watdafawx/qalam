@@ -504,6 +504,9 @@ fn on_foreground(hwnd: HWND) {
     s.disabled.store(disabled, Ordering::Relaxed);
     s.replacements_only.store(repl_only, Ordering::Relaxed);
     update_fullscreen(hwnd);
+    if !ours && caret::is_browser(hwnd) {
+        caret::wake_accessibility(hwnd);
+    }
     s.password.store(false, Ordering::Relaxed);
     if !ours {
         hook::spell(spell::Job::Dirty { hide: true });
@@ -855,6 +858,7 @@ unsafe fn update_popup(hwnd: HWND) {
         }
 
         let (caret, source) = caret::caret_rect();
+        dlog(|| format!("popup caret source={source}"));
         // No text caret anywhere (games, canvases): don't pop up over them.
         if source == "mouse" {
             lock(&s.popup_items).clear();
