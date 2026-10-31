@@ -1173,6 +1173,11 @@ fn is_fullscreen(hwnd: HWND) -> bool {
         if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Windows.UI.Core.CoreWindow") {
             return false;
         }
+        // Maximized windows overhang the monitor edges (and cover it fully with an auto-hide taskbar).
+        // Games go fullscreen without maximizing; browsers are text apps even in F11 fullscreen.
+        if IsZoomed(hwnd).as_bool() || caret::is_browser(hwnd) {
+            return false;
+        }
         let mut wr = RECT::default();
         if GetWindowRect(hwnd, &mut wr).is_err() {
             return false;
