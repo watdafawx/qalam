@@ -260,6 +260,7 @@ fn main() {
     let newline_enter = cfg.general.newline.eq_ignore_ascii_case("enter");
     let mut engine = Engine::new(learned, cfg, config::extra_replacements());
     engine.system_knows = Some(Box::new(winspell::knows));
+    winspell::warm_up();
 
     let _ = SHARED.set(Shared {
         engine: Mutex::new(engine),
