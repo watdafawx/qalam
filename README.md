@@ -36,6 +36,10 @@ Turn off Windows' own "Show text suggestions when typing on the physical keyboar
 
 - **Tray icon**: left-click opens Replacements; right-click for Languages, Highlight corrections,
   Underline misspelled words, Paused, Start with Windows, settings file, data folder, Quit.
+- **Apps** (tray > Apps...): **Blacklist** mode runs everywhere except listed apps; **Whitelist** mode runs only in
+  listed apps. Each app can be **Off**/**Full** or **Replacements only** (no popup/autocorrect/underlines; terminals
+  default to this). Add apps from a list of running windows or browse for an .exe. The tray also has a quick
+  "Turn off in <last app>" toggle.
 - **Replacements**: type a trigger, then space/Enter/punctuation. Tick **Secret** for passwords and IDs:
   they're encrypted with your Windows login (DPAPI) and never shown again.
 - **Highlight corrections**: the corrected word flashes for 250 ms, then fades out.

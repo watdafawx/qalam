@@ -55,7 +55,7 @@ pub fn hwnd() -> Option<HWND> {
     ED.with_borrow(|e| e.as_ref().map(|e| e.hwnd))
 }
 
-fn scale(h: HWND) -> f32 {
+pub(crate) fn scale(h: HWND) -> f32 {
     unsafe { GetDpiForWindow(h).max(96) as f32 / 96.0 }
 }
 
@@ -125,7 +125,7 @@ pub fn open() {
     }
 }
 
-unsafe fn child(parent: HWND, class: PCWSTR, text: &str, style: u32, ex: u32, id: i32) -> HWND {
+pub(crate) unsafe fn child(parent: HWND, class: PCWSTR, text: &str, style: u32, ex: u32, id: i32) -> HWND {
     unsafe {
         let t = wide(text);
         CreateWindowExW(
@@ -408,7 +408,7 @@ fn clear_form() {
     update_buttons();
 }
 
-fn alert(h: HWND, text: &str) {
+pub(crate) fn alert(h: HWND, text: &str) {
     let t = wide(text);
     unsafe {
         MessageBoxW(Some(h), PCWSTR(t.as_ptr()), w!("qalam"), MB_OK | MB_ICONINFORMATION);

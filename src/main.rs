@@ -2,6 +2,7 @@
 //! qalam: system-wide word suggestions, autocorrect and text replacement.
 //! Threads: `hooks` (keyboard/mouse hooks + engine), `sender` (SendInput), main (popup, tray, focus tracking).
 
+mod apps;
 mod caret;
 mod editor;
 mod hook;
@@ -66,6 +67,11 @@ const MENU_KBMODE: usize = 23;
 const MENU_HIGHLIGHT: usize = 24;
 const MENU_UNDERLINE: usize = 25;
 const MENU_AR_AUTOCORRECT: usize = 26;
+const MENU_APPS: usize = 27;
+const MENU_TOGGLE_APP: usize = 28;
+
+/// Last app (exe name) that had focus, other than qalam itself, for the tray's "Turn off in ..." item.
+static LAST_APP: Mutex<String> = Mutex::new(String::new());
 
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -356,6 +362,11 @@ unsafe fn ui_main(after_install: bool) {
             {
                 continue; // Tab between fields
             }
+            if let Some(ap) = apps::hwnd()
+                && IsDialogMessageW(ap, &msg).as_bool()
+            {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -437,6 +448,11 @@ pub fn process_name_pid(pid: u32) -> Option<String> {
     }
 }
 
+/// Re-evaluate app rules for the current foreground window (after the Apps window changes them).
+pub fn reapply_foreground() {
+    on_foreground(unsafe { GetForegroundWindow() });
+}
+
 fn on_foreground(hwnd: HWND) {
     let s = shared();
     let name = process_name(hwnd).unwrap_or_default();
@@ -448,8 +464,12 @@ fn on_foreground(hwnd: HWND) {
         eng.reset(false);
         let g = &eng.cfg.general;
         let listed = |l: &[String]| l.iter().any(|a| a.eq_ignore_ascii_case(&name));
-        (ours || listed(&g.disabled_apps), listed(&g.replacements_only_apps), eng.epoch)
+        let off = if g.app_mode.eq_ignore_ascii_case("whitelist") { !listed(&g.enabled_apps) } else { listed(&g.disabled_apps) };
+        (ours || off, listed(&g.replacements_only_apps), eng.epoch)
     };
+    if !ours && !name.is_empty() && !name.eq_ignore_ascii_case("explorer.exe") {
+        *lock(&LAST_APP) = name.clone();
+    }
     s.disabled.store(disabled, Ordering::Relaxed);
     s.replacements_only.store(repl_only, Ordering::Relaxed);
     s.password.store(false, Ordering::Relaxed);
@@ -574,6 +594,13 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                         }
                     }
                     MENU_EDITOR => editor::open(),
+                    MENU_APPS => apps::open(),
+                    MENU_TOGGLE_APP => {
+                        let app = lock(&LAST_APP).clone();
+                        if !app.is_empty() {
+                            apps::toggle_off(&app);
+                        }
+                    }
                     MENU_LANG_EN => toggle_lang(hwnd, "en"),
                     MENU_LANG_AR => toggle_lang(hwnd, "ar"),
                     MENU_AR_AUTOCORRECT => toggle_list(hwnd, "autocorrect_languages", "ar"),
@@ -659,6 +686,13 @@ unsafe fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(sub, check(kb), MENU_KBMODE, w!("Only the keyboard layout's language"));
             let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Languages"));
         }
+        let _ = AppendMenuW(menu, MF_STRING, MENU_APPS, w!("Apps..."));
+        let last = lock(&LAST_APP).clone();
+        if !last.is_empty() {
+            let t = wide(&format!("Turn off in {last}"));
+            let _ = AppendMenuW(menu, check(apps::is_off(&last)), MENU_TOGGLE_APP, PCWSTR(t.as_ptr()));
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, check(g.highlight_corrections), MENU_HIGHLIGHT, w!("Highlight corrections"));
         let _ = AppendMenuW(menu, check(g.underline_misspelled), MENU_UNDERLINE, w!("Underline misspelled words"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);

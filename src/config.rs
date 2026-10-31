@@ -18,8 +18,11 @@ accept_with_tab = true      # Tab accepts the highlighted suggestion while the p
 space_after_accept = true
 # How a line break inside a replacement is typed: "shift+enter" (safe in chat apps) or "enter".
 newline = "shift+enter"
-# Process names where qalam does nothing (games, terminals, password managers...).
+# Which apps qalam runs in (tray > Apps... edits these):
+#   "blacklist": everywhere except disabled_apps;  "whitelist": only in enabled_apps.
+app_mode = "blacklist"
 disabled_apps = ["KeePassXC.exe", "1Password.exe"]
+enabled_apps = []
 
 # Languages: "en", "ar". All of them are used at once (by the script you type in),
 # or set language_mode = "keyboard" to use only the language of the active keyboard layout.
@@ -62,6 +65,8 @@ pub struct General {
     pub space_after_accept: bool,
     pub newline: String,
     pub disabled_apps: Vec<String>,
+    pub app_mode: String,
+    pub enabled_apps: Vec<String>,
     pub languages: Vec<String>,
     pub language_mode: String,
     pub autocorrect_languages: Vec<String>,
@@ -83,6 +88,8 @@ impl Default for General {
             space_after_accept: true,
             newline: "shift+enter".into(),
             disabled_apps: vec![],
+            app_mode: "blacklist".into(),
+            enabled_apps: vec![],
             languages: vec!["en".into()],
             language_mode: "all".into(),
             autocorrect_languages: vec!["en".into()],
