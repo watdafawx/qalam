@@ -46,9 +46,7 @@ pub const WM_APP_POPUP: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const WM_APP_FLASH: u32 = WM_APP + 3;
 pub const WM_APP_SQUIGGLES: u32 = WM_APP + 4;
-pub const WM_APP_SPELLHOVER: u32 = WM_APP + 7;
 pub const WM_APP_FIXPICK: u32 = WM_APP + 8;
-const TIMER_FIXCARD: usize = 4;
 /// The popup is showing fixes for an underlined word (instead of completions).
 pub static FIXCARD_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -64,9 +62,94 @@ static FIXCARD: Mutex<Option<FixCard>> = Mutex::new(None);
 const TIMER_RELOAD: usize = 1;
 const TIMER_FLASH: usize = 2;
 const TIMER_SPELLHOVER: usize = 3;
-/// Mouse resting on an underlined word: (click count when it arrived, point).
-static PENDING_HOVER: Mutex<Option<(usize, POINT)>> = Mutex::new(None);
-const HOVER_MS: u32 = 450;
+const HOVER_MS: u128 = 450;
+
+/// Hover tracking, polled on the UI thread (mouse-move events miss squiggles that appear under a resting mouse).
+#[derive(Default)]
+struct Hover {
+    /// Word box under the mouse, since when, and the click/key count then.
+    on: Option<(RECT, std::time::Instant, usize)>,
+    /// Card already shown for this word: don't reopen until the mouse leaves it.
+    done: Option<RECT>,
+    /// Polls in a row with the mouse away from an open card.
+    away: u32,
+}
+thread_local! {
+    static HOVER: std::cell::RefCell<Hover> = std::cell::RefCell::new(Hover::default());
+}
+
+/// Underlined word box (all its line rects merged) under `p`, with its ids.
+fn squiggle_at(p: POINT) -> Option<(u64, usize, RECT)> {
+    let s = lock(&shared().squiggles);
+    let hit = |r: &RECT| p.x >= r.left && p.x < r.right && p.y >= r.top - 2 && p.y < r.bottom + 4;
+    let q = s.items.iter().find(|q| q.rects.iter().any(hit))?;
+    let mut u = q.rects[0];
+    for r in &q.rects[1..] {
+        u.left = u.left.min(r.left);
+        u.top = u.top.min(r.top);
+        u.right = u.right.max(r.right);
+        u.bottom = u.bottom.max(r.bottom);
+    }
+    Some((s.scan_id, q.id, u))
+}
+
+unsafe fn hover_tick(hwnd: HWND) {
+    unsafe {
+        let mut cur = POINT::default();
+        let _ = GetCursorPos(&mut cur);
+        let clicks = hook::CLICKS.load(Ordering::Relaxed);
+        let near = |r: &RECT, m: i32| cur.x >= r.left - m && cur.x < r.right + m && cur.y >= r.top - m && cur.y < r.bottom + m;
+        let card = lock(&FIXCARD).as_ref().map(|c| (c.rect, c.clicks));
+        if let Some((word, opened_clicks)) = card {
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut wr);
+            // Word, card, and the strip between them all count as "still here".
+            let span = RECT { left: word.left.min(wr.left), top: word.top.min(wr.top), right: word.right.max(wr.right), bottom: word.bottom.max(wr.bottom) };
+            let here = near(&word, 6) || near(&wr, 8) || (near(&span, 0) && cur.x >= wr.left - 8 && cur.x < word.right.max(wr.left + 60));
+            let close = HOVER.with_borrow_mut(|h| {
+                h.away = if here { 0 } else { h.away + 1 };
+                if clicks != opened_clicks || h.away >= 3 {
+                    h.done = Some(word);
+                    h.on = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            if close {
+                close_fixcard(hwnd);
+            }
+            return;
+        }
+        let hit = if hook::active() { squiggle_at(cur) } else { None };
+        let open = HOVER.with_borrow_mut(|h| {
+            let Some((scan_id, id, r)) = hit else {
+                h.on = None;
+                h.done = None;
+                return None;
+            };
+            if h.done.is_some_and(|d| near(&d, 4)) {
+                return None;
+            }
+            h.done = None;
+            match h.on {
+                Some((was, since, c)) if was == r && c == clicks => {
+                    if since.elapsed().as_millis() >= HOVER_MS {
+                        h.on = None;
+                        h.away = 0;
+                        return Some((scan_id, id));
+                    }
+                }
+                _ => h.on = Some((r, std::time::Instant::now(), clicks)),
+            }
+            None
+        });
+        if let Some((scan_id, id)) = open {
+            dlog(|| "hover fixes: open".into());
+            open_fixcard(hwnd, scan_id, id);
+        }
+    }
+}
 const FLASH_HOLD_MS: f32 = 250.0;
 const FLASH_FADE_MS: f32 = 280.0;
 const STATE_SYSTEM_PROTECTED: i32 = 0x2000_0000;
@@ -379,6 +462,7 @@ unsafe fn ui_main(note: Option<String>) {
         .expect("tray window");
 
         shared().popup_hwnd.store(popup.0 as isize, Ordering::Relaxed);
+        SetTimer(Some(popup), TIMER_SPELLHOVER, 100, None);
         TRAY_HWND.store(tray.0 as isize, Ordering::Relaxed);
         FLASH_WIN.set(Some(overlay::Layered::new()));
         SQUIG_WIN.set(Some(overlay::Layered::new()));
@@ -1025,52 +1109,13 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
                 draw_squiggles();
                 LRESULT(0)
             }
-            WM_APP_SPELLHOVER => {
-                let _ = KillTimer(Some(hwnd), TIMER_SPELLHOVER);
-                if wparam.0 == 0 {
-                    *lock(&PENDING_HOVER) = None;
-                } else {
-                    let v = lparam.0 as u64;
-                    let pt = POINT { x: (v >> 32) as u32 as i32, y: v as u32 as i32 };
-                    *lock(&PENDING_HOVER) = Some((hook::CLICKS.load(Ordering::Relaxed), pt));
-                    SetTimer(Some(hwnd), TIMER_SPELLHOVER, HOVER_MS, None);
-                }
-                LRESULT(0)
-            }
             WM_TIMER if wparam.0 == TIMER_SPELLHOVER => {
-                let _ = KillTimer(Some(hwnd), TIMER_SPELLHOVER);
-                let pending = lock(&PENDING_HOVER).take();
-                let mut cur = POINT::default();
-                let _ = GetCursorPos(&mut cur);
-                // Skip if the user clicked meanwhile (placing the caret, selecting) or the mouse moved off.
-                let hit = pending.filter(|(clicks, _)| *clicks == hook::CLICKS.load(Ordering::Relaxed)).and_then(|_| hook::hit_squiggle(cur));
-                dlog(|| format!("hover fixes: {}", if hit.is_some() { "open" } else { "skipped" }));
-                if let Some((scan_id, id)) = hit {
-                    open_fixcard(hwnd, scan_id, id);
-                }
-                LRESULT(0)
-            }
-            WM_TIMER if wparam.0 == TIMER_FIXCARD => {
-                // Close once the mouse is off both the word and the card, or the user clicked/typed.
-                let mut cur = POINT::default();
-                let _ = GetCursorPos(&mut cur);
-                let mut wr = RECT::default();
-                let _ = GetWindowRect(hwnd, &mut wr);
-                let keep = lock(&FIXCARD).as_ref().is_some_and(|c| {
-                    let near = |r: &RECT, m: i32| cur.x >= r.left - m && cur.x < r.right + m && cur.y >= r.top - m && cur.y < r.bottom + m;
-                    // The gap between word and card counts too.
-                    let bridge = RECT { left: c.rect.left.min(wr.left), top: c.rect.top.min(wr.top), right: c.rect.right.max(wr.left + 40), bottom: c.rect.bottom.max(wr.top) };
-                    c.clicks == hook::CLICKS.load(Ordering::Relaxed) && (near(&c.rect, 4) || near(&wr, 6) || near(&bridge, 0))
-                });
-                if !keep {
-                    close_fixcard(hwnd);
-                }
+                hover_tick(hwnd);
                 LRESULT(0)
             }
             WM_APP_FIXPICK => {
                 let card = lock(&FIXCARD).take();
                 FIXCARD_OPEN.store(false, Ordering::Relaxed);
-                let _ = KillTimer(Some(hwnd), TIMER_FIXCARD);
                 if let Some(c) = card {
                     if let Some(fix) = c.fixes.get(wparam.0) {
                         hook::spell(spell::Job::Replace { scan_id: c.scan_id, id: c.id, text: fix.clone() });
@@ -1210,13 +1255,11 @@ unsafe fn open_fixcard(hwnd: HWND, scan_id: u64, id: usize) {
         *lock(&FIXCARD) = Some(FixCard { scan_id, id, word, fixes, rect, clicks: hook::CLICKS.load(Ordering::Relaxed) });
         FIXCARD_OPEN.store(true, Ordering::Relaxed);
         update_popup(hwnd);
-        SetTimer(Some(hwnd), TIMER_FIXCARD, 100, None);
     }
 }
 
 unsafe fn close_fixcard(hwnd: HWND) {
     unsafe {
-        let _ = KillTimer(Some(hwnd), TIMER_FIXCARD);
         if lock(&FIXCARD).take().is_some() {
             FIXCARD_OPEN.store(false, Ordering::Relaxed);
             dlog(|| "fix card closed".into());
