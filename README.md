@@ -32,7 +32,7 @@ Turn off Windows' own "Show text suggestions when typing on the physical keyboar
 | Esc | close popup | normal |
 | Click a word | accept it | |
 | Backspace right after an autocorrect | undo it and remember the word | |
-| Click or right-click an underlined word | fixes + "Add to dictionary" | |
+| Hover over or right-click an underlined word | fixes + "Add to dictionary" | |
 
 - **Tray icon**: left-click opens Replacements; right-click for Languages, Highlight corrections,
   Underline misspelled words, Paused, Start with Windows, settings file, data folder, Quit.

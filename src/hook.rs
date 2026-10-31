@@ -2,7 +2,7 @@
 //! Windows silently removes a low-level hook that takes too long, so everything here stays quick.
 
 use crate::spell::Job;
-use crate::{WM_APP_POPUP, WM_APP_SPELLCLICK, WM_APP_SPELLMENU, dlog, lock, send::MAGIC, shared};
+use crate::{WM_APP_POPUP, WM_APP_SPELLHOVER, WM_APP_SPELLMENU, dlog, lock, send::MAGIC, shared};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -17,8 +17,8 @@ thread_local! {
     static EATEN: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     static EAT_MOUSE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static EAT_RMOUSE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Left button went down on an underlined word here.
-    static SQUIGGLE_DOWN: std::cell::Cell<Option<POINT>> = const { std::cell::Cell::new(None) };
+    /// Rectangle of the underlined word the mouse is resting on.
+    static HOVER_RECT: std::cell::Cell<Option<windows::Win32::Foundation::RECT>> = const { std::cell::Cell::new(None) };
     /// Language of the foreground keyboard layout, updated on every key.
     static KB_LANG: std::cell::Cell<Option<Lang>> = const { std::cell::Cell::new(None) };
 }
@@ -219,6 +219,7 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             if k.dwExtraInfo != MAGIC && active() {
                 let msg = wparam.0 as u32;
                 if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+                    CLICKS.fetch_add(1, Ordering::Relaxed); // typing cancels a pending hover menu
                     if on_key_down(k) {
                         EATEN.with_borrow_mut(|s| s.insert(k.vkCode));
                         return LRESULT(1);
@@ -246,7 +247,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                             return LRESULT(1);
                         }
                         CLICKS.fetch_add(1, Ordering::Relaxed);
-                        SQUIGGLE_DOWN.set(hit_squiggle(m.pt).map(|_| m.pt));
                         reset("left click", false);
                         spell(Job::Dirty { hide: false });
                     }
@@ -254,17 +254,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         EAT_MOUSE_UP.set(false);
                         return LRESULT(1);
                     }
-                    WM_LBUTTONUP => {
-                        // Plain click (no drag) on an underlined word: show fixes, unless it turns into a double-click.
-                        if let Some(d) = SQUIGGLE_DOWN.take()
-                            && (d.x - m.pt.x).abs() <= 4
-                            && (d.y - m.pt.y).abs() <= 4
-                        {
-                            let h = shared().popup_hwnd.load(Ordering::Relaxed);
-                            let pt = ((m.pt.x as u32 as u64) << 32 | m.pt.y as u32 as u64) as isize;
-                            let _ = PostMessageW(Some(HWND(h as _)), WM_APP_SPELLCLICK, WPARAM(CLICKS.load(Ordering::Relaxed)), LPARAM(pt));
-                        }
-                    }
+                    WM_MOUSEMOVE => hover(m.pt),
                     WM_RBUTTONDOWN => {
                         CLICKS.fetch_add(1, Ordering::Relaxed);
                         if let Some((scan_id, id)) = hit_squiggle(m.pt) {
@@ -290,8 +280,27 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
-/// Counts mouse-button presses, so a pending click-to-fix can tell a double-click happened.
+/// Counts clicks and key presses, so a pending hover menu can tell the user did something meanwhile.
 pub static CLICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Mouse moved: tell the UI when it enters or leaves an underlined word (it opens the fixes after a short rest).
+/// Staying inside the same word's box counts as the same hover, even when a rescan renumbers the words.
+fn hover(p: POINT) {
+    let inside = |r: &windows::Win32::Foundation::RECT| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom + 4;
+    if HOVER_RECT.get().is_some_and(|r| inside(&r)) {
+        return;
+    }
+    let hit = {
+        let s = lock(&shared().squiggles);
+        s.items.iter().find_map(|q| q.rects.iter().find(|r| inside(r)).copied())
+    };
+    let was = HOVER_RECT.replace(hit).is_some();
+    if hit.is_some() || was {
+        let h = shared().popup_hwnd.load(Ordering::Relaxed);
+        let pt = ((p.x as u32 as u64) << 32 | p.y as u32 as u64) as isize;
+        let _ = unsafe { PostMessageW(Some(HWND(h as _)), WM_APP_SPELLHOVER, WPARAM(hit.is_some() as usize), LPARAM(pt)) };
+    }
+}
 
 pub fn hit_squiggle(p: POINT) -> Option<(u64, usize)> {
     let s = lock(&shared().squiggles);
