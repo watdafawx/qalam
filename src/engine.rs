@@ -182,6 +182,20 @@ impl Engine {
 
     /// For the spell checker: should `word` get a squiggle? Uses every enabled language.
     pub fn misspelled(&self, word: &str) -> bool {
+        self.misspelled_local(word).is_some_and(|l| !self.system_knows(word, l) || self.forced_typo(word))
+    }
+
+    fn forced_typo(&self, word: &str) -> bool {
+        let k = norm_key(word);
+        self.user_typos.contains_key(&k) || self.dict_for(word, Ctx::default()).is_some_and(|d| d.typos.contains_key(&k))
+    }
+
+    /// Misspelled by our own word lists alone (no OS spell checker); Some(language) if so.
+    pub fn misspelled_local(&self, word: &str) -> Option<Lang> {
+        self.misspelled_lists(word).then(|| self.dict_for(word, Ctx::default()).map(|d| d.lang)).flatten()
+    }
+
+    fn misspelled_lists(&self, word: &str) -> bool {
         let n = word.chars().count();
         if n < 2 || word.chars().any(|c| c.is_ascii_digit()) {
             return false;
@@ -195,7 +209,7 @@ impl Engine {
         if self.user_typos.contains_key(&k) || d.typos.contains_key(&k) {
             return true;
         }
-        !d.known(word) && self.learned.get(word) < LEARN_SUGGEST_MIN && !self.system_knows(word, d.lang)
+        !d.known(word) && self.learned.get(word) < LEARN_SUGGEST_MIN
     }
 
     fn system_knows(&self, word: &str, lang: Lang) -> bool {

@@ -355,10 +355,14 @@ fn scan(auto: &IUIAutomation) -> Option<(Vec<Squiggle>, Vec<IUIAutomationTextRan
         for i in 0..n {
             let Ok(r) = vis.GetElement(i) else { continue };
             let text = text_of(&r, 6_000);
-            let bad: Vec<(usize, String)> = {
+            // Our own lists under the engine lock (fast); the OS spell checker after releasing it,
+            // so the keyboard hook never waits on it.
+            let candidates: Vec<(usize, String, qalam::dict::Lang)> = {
                 let eng = lock(&shared().engine);
-                tokens(&text).into_iter().filter(|(_, w)| eng.misspelled(w)).take(80).collect()
+                tokens(&text).into_iter().filter_map(|(i, w)| eng.misspelled_local(&w).map(|l| (i, w, l))).take(200).collect()
             };
+            let bad: Vec<(usize, String)> =
+                candidates.into_iter().filter(|(_, w, l)| !crate::winspell::knows(w, *l)).map(|(i, w, _)| (i, w)).take(80).collect();
             for (start, word) in bad {
                 let len = word.chars().count() as i32;
                 let Ok(wr) = r.Clone() else { continue };

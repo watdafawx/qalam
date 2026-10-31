@@ -28,10 +28,24 @@ pub fn spawn() {
     std::thread::Builder::new()
         .name("hooks".into())
         .spawn(|| unsafe {
-            let kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), None, 0).expect("keyboard hook");
-            let ms = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0).expect("mouse hook");
+            let mut kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), None, 0).expect("keyboard hook");
+            let mut ms = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0).expect("mouse hook");
+            // Windows silently removes a low-level hook that once took too long. Re-install both
+            // now and then so a hiccup can't leave qalam deaf until restart.
+            let timer = SetTimer(None, 0, 30_000, None);
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if msg.message == WM_TIMER && msg.wParam.0 == timer {
+                    if let Ok(k) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), None, 0) {
+                        let _ = UnhookWindowsHookEx(kb);
+                        kb = k;
+                    }
+                    if let Ok(m) = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) {
+                        let _ = UnhookWindowsHookEx(ms);
+                        ms = m;
+                    }
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
