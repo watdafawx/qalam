@@ -334,8 +334,16 @@ fn scan(auto: &IUIAutomation) -> Option<(Vec<Squiggle>, Vec<IUIAutomationTextRan
             return None;
         }
         let name = process_name_pid(el.CurrentProcessId().ok()? as u32).unwrap_or_default();
-        if lock(&shared().engine).cfg.general.underline_skip_apps.iter().any(|a| a.eq_ignore_ascii_case(&name)) {
-            return None;
+        {
+            // Check the text box's own app too (not just the foreground window): terminals and
+            // turned-off apps are never scanned, since reading a big console buffer can stall it.
+            let eng = lock(&shared().engine);
+            let g = &eng.cfg.general;
+            let listed = |l: &[String]| l.iter().any(|a| a.eq_ignore_ascii_case(&name));
+            let off = if g.app_mode.eq_ignore_ascii_case("whitelist") { !listed(&g.enabled_apps) } else { listed(&g.disabled_apps) };
+            if off || listed(&g.underline_skip_apps) || listed(&g.replacements_only_apps) {
+                return None;
+            }
         }
         let vis = tp.GetVisibleRanges().ok()?;
         let n = vis.Length().ok()?.min(4);
@@ -345,7 +353,7 @@ fn scan(auto: &IUIAutomation) -> Option<(Vec<Squiggle>, Vec<IUIAutomationTextRan
         let mut ranges = Vec::new();
         for i in 0..n {
             let Ok(r) = vis.GetElement(i) else { continue };
-            let text = text_of(&r, 20_000);
+            let text = text_of(&r, 6_000);
             let bad: Vec<(usize, String)> = {
                 let eng = lock(&shared().engine);
                 tokens(&text).into_iter().filter(|(_, w)| eng.misspelled(w)).take(80).collect()
