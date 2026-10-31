@@ -46,8 +46,21 @@ pub const WM_APP_POPUP: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const WM_APP_FLASH: u32 = WM_APP + 3;
 pub const WM_APP_SQUIGGLES: u32 = WM_APP + 4;
-pub const WM_APP_SPELLMENU: u32 = WM_APP + 5;
 pub const WM_APP_SPELLHOVER: u32 = WM_APP + 7;
+pub const WM_APP_FIXPICK: u32 = WM_APP + 8;
+const TIMER_FIXCARD: usize = 4;
+/// The popup is showing fixes for an underlined word (instead of completions).
+pub static FIXCARD_OPEN: AtomicBool = AtomicBool::new(false);
+
+struct FixCard {
+    scan_id: u64,
+    id: usize,
+    word: String,
+    fixes: Vec<String>,
+    rect: RECT,
+    clicks: usize,
+}
+static FIXCARD: Mutex<Option<FixCard>> = Mutex::new(None);
 const TIMER_RELOAD: usize = 1;
 const TIMER_FLASH: usize = 2;
 const TIMER_SPELLHOVER: usize = 3;
@@ -846,12 +859,20 @@ unsafe fn font_for(dpi: u32) -> HFONT {
 
 unsafe fn update_popup(hwnd: HWND) {
     unsafe {
-        let view = {
-            let eng = lock(&shared().engine);
-            PopupView {
-                labels: eng.suggestions.iter().map(|s| s.label.clone()).collect(),
-                selected: eng.selected,
-                nav: eng.nav,
+        let card = lock(&FIXCARD).as_ref().map(|c| {
+            let mut labels = c.fixes.clone();
+            labels.push(format!("Add '{}' to dictionary", c.word));
+            (labels, c.rect)
+        });
+        let view = match &card {
+            Some((labels, _)) => PopupView { labels: labels.clone(), selected: usize::MAX, nav: false },
+            None => {
+                let eng = lock(&shared().engine);
+                PopupView {
+                    labels: eng.suggestions.iter().map(|s| s.label.clone()).collect(),
+                    selected: eng.selected,
+                    nav: eng.nav,
+                }
             }
         };
         let s = shared();
@@ -862,7 +883,10 @@ unsafe fn update_popup(hwnd: HWND) {
             return;
         }
 
-        let (caret, source) = caret::caret_rect();
+        let (caret, source) = match card {
+            Some((_, r)) => (r, "word"),
+            None => caret::caret_rect(),
+        };
         dlog(|| format!("popup caret source={source}"));
         // No text caret anywhere (games, canvases): don't pop up over them.
         if source == "mouse" {
@@ -1001,10 +1025,6 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
                 draw_squiggles();
                 LRESULT(0)
             }
-            WM_APP_SPELLMENU => {
-                spell_menu(wparam.0, lparam.0 as u64);
-                LRESULT(0)
-            }
             WM_APP_SPELLHOVER => {
                 let _ = KillTimer(Some(hwnd), TIMER_SPELLHOVER);
                 if wparam.0 == 0 {
@@ -1026,8 +1046,40 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
                 let hit = pending.filter(|(clicks, _)| *clicks == hook::CLICKS.load(Ordering::Relaxed)).and_then(|_| hook::hit_squiggle(cur));
                 dlog(|| format!("hover fixes: {}", if hit.is_some() { "open" } else { "skipped" }));
                 if let Some((scan_id, id)) = hit {
-                    spell_menu(id, scan_id);
+                    open_fixcard(hwnd, scan_id, id);
                 }
+                LRESULT(0)
+            }
+            WM_TIMER if wparam.0 == TIMER_FIXCARD => {
+                // Close once the mouse is off both the word and the card, or the user clicked/typed.
+                let mut cur = POINT::default();
+                let _ = GetCursorPos(&mut cur);
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut wr);
+                let keep = lock(&FIXCARD).as_ref().is_some_and(|c| {
+                    let near = |r: &RECT, m: i32| cur.x >= r.left - m && cur.x < r.right + m && cur.y >= r.top - m && cur.y < r.bottom + m;
+                    // The gap between word and card counts too.
+                    let bridge = RECT { left: c.rect.left.min(wr.left), top: c.rect.top.min(wr.top), right: c.rect.right.max(wr.left + 40), bottom: c.rect.bottom.max(wr.top) };
+                    c.clicks == hook::CLICKS.load(Ordering::Relaxed) && (near(&c.rect, 4) || near(&wr, 6) || near(&bridge, 0))
+                });
+                if !keep {
+                    close_fixcard(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_APP_FIXPICK => {
+                let card = lock(&FIXCARD).take();
+                FIXCARD_OPEN.store(false, Ordering::Relaxed);
+                let _ = KillTimer(Some(hwnd), TIMER_FIXCARD);
+                if let Some(c) = card {
+                    if let Some(fix) = c.fixes.get(wparam.0) {
+                        hook::spell(spell::Job::Replace { scan_id: c.scan_id, id: c.id, text: fix.clone() });
+                    } else {
+                        lock(&shared().engine).learned.accept(&c.word);
+                        hook::spell(spell::Job::Dirty { hide: false });
+                    }
+                }
+                update_popup(hwnd);
                 LRESULT(0)
             }
             WM_PAINT => {
@@ -1132,44 +1184,43 @@ fn draw_squiggles() {
     });
 }
 
-unsafe fn spell_menu(id: usize, scan_id: u64) {
+/// Show the fixes for an underlined word in the popup, right under the word.
+unsafe fn open_fixcard(hwnd: HWND, scan_id: u64, id: usize) {
     unsafe {
-        let word = {
+        let (word, rect) = {
             let s = lock(&shared().squiggles);
             if s.scan_id != scan_id {
                 return;
             }
             match s.items.iter().find(|q| q.id == id) {
-                Some(q) => q.word.clone(),
+                Some(q) => {
+                    let mut r = q.rects[0];
+                    for x in &q.rects[1..] {
+                        r.left = r.left.min(x.left);
+                        r.top = r.top.min(x.top);
+                        r.right = r.right.max(x.right);
+                        r.bottom = r.bottom.max(x.bottom);
+                    }
+                    (q.word.clone(), r)
+                }
                 None => return,
             }
         };
         let fixes = lock(&shared().engine).fixes_for(&word, 4);
-        let tray = HWND(TRAY_HWND.load(Ordering::Relaxed) as _);
-        let prev = GetForegroundWindow();
-        let Ok(menu) = CreatePopupMenu() else { return };
-        for (i, f) in fixes.iter().enumerate() {
-            let t = wide(f);
-            let _ = AppendMenuW(menu, MF_STRING, 1000 + i, PCWSTR(t.as_ptr()));
-        }
-        if fixes.is_empty() {
-            let _ = AppendMenuW(menu, MF_GRAYED, 0, w!("No suggestions"));
-        }
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let add = wide(&format!("Add \u{201c}{word}\u{201d} to dictionary"));
-        let _ = AppendMenuW(menu, MF_STRING, 999, PCWSTR(add.as_ptr()));
-        let mut p = POINT::default();
-        let _ = GetCursorPos(&mut p);
-        let _ = SetForegroundWindow(tray);
-        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, Some(0), tray, None).0 as usize;
-        let _ = PostMessageW(Some(tray), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        let _ = SetForegroundWindow(prev);
-        if (1000..1000 + fixes.len()).contains(&cmd) {
-            hook::spell(spell::Job::Replace { scan_id, id, text: fixes[cmd - 1000].clone() });
-        } else if cmd == 999 {
-            lock(&shared().engine).learned.accept(&word);
-            hook::spell(spell::Job::Dirty { hide: false });
+        *lock(&FIXCARD) = Some(FixCard { scan_id, id, word, fixes, rect, clicks: hook::CLICKS.load(Ordering::Relaxed) });
+        FIXCARD_OPEN.store(true, Ordering::Relaxed);
+        update_popup(hwnd);
+        SetTimer(Some(hwnd), TIMER_FIXCARD, 100, None);
+    }
+}
+
+unsafe fn close_fixcard(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_FIXCARD);
+        if lock(&FIXCARD).take().is_some() {
+            FIXCARD_OPEN.store(false, Ordering::Relaxed);
+            dlog(|| "fix card closed".into());
+            update_popup(hwnd);
         }
     }
 }

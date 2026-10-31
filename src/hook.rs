@@ -2,7 +2,7 @@
 //! Windows silently removes a low-level hook that takes too long, so everything here stays quick.
 
 use crate::spell::Job;
-use crate::{WM_APP_POPUP, WM_APP_SPELLHOVER, WM_APP_SPELLMENU, dlog, lock, send::MAGIC, shared};
+use crate::{FIXCARD_OPEN, WM_APP_FIXPICK, WM_APP_POPUP, WM_APP_SPELLHOVER, dlog, lock, send::MAGIC, shared};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -16,7 +16,6 @@ thread_local! {
     /// Keys whose key-down we ate; eat the key-up too.
     static EATEN: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     static EAT_MOUSE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static EAT_RMOUSE_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Rectangle of the underlined word the mouse is resting on.
     static HOVER_RECT: std::cell::Cell<Option<windows::Win32::Foundation::RECT>> = const { std::cell::Cell::new(None) };
     /// Language of the foreground keyboard layout, updated on every key.
@@ -242,6 +241,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 match msg {
                     WM_LBUTTONDOWN => {
                         if let Some(i) = hit_popup(m.pt) {
+                            if FIXCARD_OPEN.load(Ordering::Relaxed) {
+                                // Fix card under an underlined word: apply that fix.
+                                let h = shared().popup_hwnd.load(Ordering::Relaxed);
+                                let _ = PostMessageW(Some(HWND(h as _)), WM_APP_FIXPICK, WPARAM(i), LPARAM(0));
+                                EAT_MOUSE_UP.set(true);
+                                return LRESULT(1);
+                            }
                             run("click popup", |e, ctx| e.accept(i, ctx));
                             EAT_MOUSE_UP.set(true);
                             return LRESULT(1);
@@ -257,18 +263,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     WM_MOUSEMOVE => hover(m.pt),
                     WM_RBUTTONDOWN => {
                         CLICKS.fetch_add(1, Ordering::Relaxed);
-                        if let Some((scan_id, id)) = hit_squiggle(m.pt) {
-                            // Right-click on an underlined word: show fixes.
-                            let h = shared().popup_hwnd.load(Ordering::Relaxed);
-                            let _ = PostMessageW(Some(HWND(h as _)), WM_APP_SPELLMENU, WPARAM(id), LPARAM(scan_id as isize));
-                            EAT_RMOUSE_UP.set(true);
-                            return LRESULT(1);
-                        }
                         reset("other click", false);
-                    }
-                    WM_RBUTTONUP if EAT_RMOUSE_UP.get() => {
-                        EAT_RMOUSE_UP.set(false);
-                        return LRESULT(1);
                     }
                     WM_MOUSEWHEEL | WM_MOUSEHWHEEL => spell(Job::Dirty { hide: true }),
                     WM_MBUTTONDOWN | WM_XBUTTONDOWN => reset("other click", false),
