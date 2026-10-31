@@ -269,6 +269,16 @@ impl Engine {
     }
 
     /// Trailing run of non-whitespace (for triggers like ";pw" or "@@addr").
+    /// The word is glued to other characters (a link, path, email, @handle, snake_case, version...):
+    /// leave it alone. Only opening brackets/quotes may sit in front of a normal word.
+    fn word_is_embedded(&self) -> bool {
+        let token = self.token();
+        let word = self.word();
+        let prefix_len = token.chars().count().saturating_sub(word.chars().count());
+        let prefix: String = token.chars().take(prefix_len).collect();
+        !prefix.chars().all(|c| "([{\"'“‘«¿¡".contains(c))
+    }
+
     fn token(&self) -> String {
         let start = self.history.iter().rposition(|c| c.is_whitespace()).map_or(0, |i| i + 1);
         self.history[start..].iter().collect()
@@ -455,6 +465,11 @@ impl Engine {
             self.push_sep(sep);
             return Action::Pass;
         }
+        if self.word_is_embedded() {
+            // Part of a link/path/email: no autocorrect, and don't learn URL fragments as words.
+            self.push_sep(sep);
+            return Action::Pass;
+        }
 
         // 2. Autocorrect.
         if self.cfg.general.autocorrect
@@ -553,7 +568,7 @@ impl Engine {
         let has_digit = word.chars().any(|c| c.is_ascii_digit());
         let arabizi_on = g.arabizi && self.arabizi.is_some() && arabizi::looks_like_arabizi(&word);
         let mut out: Vec<Suggestion> = Vec::new();
-        if g.suggestions && !self.dirty && !ctx.password && n >= g.min_prefix.max(1) {
+        if g.suggestions && !self.dirty && !ctx.password && n >= g.min_prefix.max(1) && !self.word_is_embedded() {
             if !has_digit && let Some(dict) = self.dict_for(&word, ctx) {
                 // With Arabizi on, keep the last slot for the Arabic reading.
                 let slots = if arabizi_on { max.saturating_sub(1).max(1) } else { max };
@@ -837,6 +852,21 @@ mod tests {
         let ep = e.epoch;
         assert!(e.seed("first line\nte", false, ep, Ctx::default()));
         assert!(matches!(last(&mut e, "h "), Action::Send(_)));
+    }
+
+    #[test]
+    fn links_paths_and_emails_are_left_alone() {
+        let mut e = engine();
+        assert_eq!(last(&mut e, "https://github.com/watdafawx/qalam "), Action::Pass);
+        assert_eq!(last(&mut e, r"C:\Users\becuse "), Action::Pass);
+        assert_eq!(last(&mut e, "me@exmple.com "), Action::Pass);
+        assert_eq!(last(&mut e, "my_vairable "), Action::Pass);
+        typ(&mut e, "github.com/becau");
+        assert!(!e.popup_visible());
+        // Brackets and quotes in front are fine.
+        assert!(matches!(last(&mut e, " (teh "), Action::Send(_)));
+        assert!(matches!(last(&mut e, " \"teh "), Action::Send(_)));
+        assert!(e.learned.get("qalam") == 0, "URL pieces aren't learned");
     }
 
     #[test]
