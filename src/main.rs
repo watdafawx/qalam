@@ -500,6 +500,9 @@ fn on_foreground(hwnd: HWND) {
         let off = if g.app_mode.eq_ignore_ascii_case("whitelist") { !listed(&g.enabled_apps) } else { listed(&g.disabled_apps) };
         (ours || off, listed(&g.replacements_only_apps), eng.epoch)
     };
+    // Game windows (windowed or not): movement keys aren't words, so stay fully off.
+    let game = is_game_window(hwnd);
+    let disabled = disabled || game;
     if !ours && !name.is_empty() && !name.eq_ignore_ascii_case("explorer.exe") {
         *lock(&LAST_APP) = name.clone();
     }
@@ -514,7 +517,7 @@ fn on_foreground(hwnd: HWND) {
         hook::spell(spell::Job::Dirty { hide: true });
         hook::spell(spell::Job::Sync { epoch });
     }
-    dlog(|| format!("foreground {name} class={} disabled={disabled} -> reset", class_name(hwnd)));
+    dlog(|| format!("foreground {name} class={} disabled={disabled} game={game} -> reset", class_name(hwnd)));
     refresh_popup();
 }
 
@@ -1120,6 +1123,17 @@ fn install_update(tray: HWND, u: &update::Update) {
 }
 
 /// Does `hwnd` cover its whole monitor (exclusive or borderless fullscreen)? Desktop/shell windows don't count.
+/// Window classes used by game engines and frameworks (Minecraft/GLFW, SDL, Unity, Unreal, Source, GameMaker, Godot...).
+fn is_game_window(hwnd: HWND) -> bool {
+    let c = class_name(hwnd);
+    const GAME: &[&str] = &[
+        "GLFW30", "LWJGL", "SDL_app", "UnityWndClass", "UnrealWindow", "Valve001", "SDL2", "YYGameMakerYY",
+        "Engine", "CryENGINE", "LaunchUnrealUWindowsClient", "OgreD3D11Wnd", "OgreGLWindow", "RiotWindowClass",
+        "Godot_Engine", "raylib", "GLUT", "FreeGLUT", "Minecraft", "osu!", "Roblox", "TankWindowClass",
+    ];
+    GAME.iter().any(|g| c.eq_ignore_ascii_case(g)) || c.starts_with("GLFW") || c.starts_with("SDL")
+}
+
 fn is_fullscreen(hwnd: HWND) -> bool {
     unsafe {
         if hwnd.is_invalid() {
