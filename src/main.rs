@@ -73,6 +73,7 @@ const MENU_TOGGLE_APP: usize = 28;
 const MENU_UPDATE: usize = 29;
 const MENU_CHECK_UPDATE: usize = 30;
 const MENU_AUTO_UPDATE: usize = 31;
+const MENU_AUTOCORRECT: usize = 32;
 const WM_APP_UPDATE: u32 = WM_APP + 6;
 pub const UPDATE_FOUND: usize = 1;
 pub const UPDATE_NONE: usize = 2;
@@ -687,6 +688,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                     MENU_LANG_AR => toggle_lang(hwnd, "ar"),
                     MENU_AR_AUTOCORRECT => toggle_list(hwnd, "autocorrect_languages", "ar"),
                     MENU_ARABIZI => toggle_bool(hwnd, "arabizi", |g| g.arabizi),
+                    MENU_AUTOCORRECT => toggle_bool(hwnd, "autocorrect", |g| g.autocorrect),
                     MENU_HIGHLIGHT => toggle_bool(hwnd, "highlight_corrections", |g| g.highlight_corrections),
                     MENU_UNDERLINE => toggle_bool(hwnd, "underline_misspelled", |g| g.underline_misspelled),
                     MENU_KBMODE => {
@@ -780,6 +782,7 @@ unsafe fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(menu, check(apps::is_off(&last)), MENU_TOGGLE_APP, PCWSTR(t.as_ptr()));
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, check(g.autocorrect), MENU_AUTOCORRECT, w!("Autocorrect"));
         let _ = AppendMenuW(menu, check(g.highlight_corrections), MENU_HIGHLIGHT, w!("Highlight corrections"));
         let _ = AppendMenuW(menu, check(g.underline_misspelled), MENU_UNDERLINE, w!("Underline misspelled words"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);

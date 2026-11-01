@@ -1,6 +1,6 @@
 [package]
 name = "qalam"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2024"
 build = "build.rs"
 description = "System-wide word suggestions, autocorrect, spell-check and text replacement for Windows"
