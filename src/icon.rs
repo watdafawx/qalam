@@ -59,6 +59,13 @@ fn sample(p: P, nib: &[P], ferrule: &[P], slit: (P, P), dot: P, wave: &[P]) -> (
 }
 
 pub fn make(size: i32) -> HICON {
+    let n = size.max(16) as usize;
+    let px = pixels(n);
+    make_from(n, &px)
+}
+
+/// The icon at n×n pixels, premultiplied BGRA (0xAARRGGBB).
+pub fn pixels(n: usize) -> Vec<u32> {
     let c = (128.0, 112.0);
     let nib: Vec<P> = [(128.0, 44.0), (164.0, 108.0), (148.0, 164.0), (108.0, 164.0), (92.0, 108.0)]
         .iter()
@@ -73,7 +80,6 @@ pub fn make(size: i32) -> HICON {
     // Zigzag approximation of the squiggle from x=52 to 192 at y≈204.
     let wave: Vec<P> = (0..=14).map(|i| (52.0 + i as f32 * 10.0, if i % 2 == 0 { 204.0 } else { 196.0 })).collect();
 
-    let n = size.max(16) as usize;
     let mut px = vec![0u32; n * n];
     const SS: usize = 4;
     for y in 0..n {
@@ -95,7 +101,10 @@ pub fn make(size: i32) -> HICON {
             px[y * n + x] = ((a * 255.0) as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32;
         }
     }
+    px
+}
 
+fn make_from(n: usize, px: &[u32]) -> HICON {
     unsafe {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -121,5 +130,55 @@ pub fn make(size: i32) -> HICON {
         let _ = DeleteObject(mask.into());
         let _ = DeleteObject(color.into());
         icon
+    }
+}
+
+/// Writes assets/qalam.ico (embedded in the exe by build.rs). Run after changing the drawing:
+/// `cargo test write_ico -- --ignored`
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore]
+    fn write_ico() {
+        let sizes = [16usize, 20, 24, 32, 40, 48, 64, 256];
+        let mut images = Vec::new();
+        for &n in &sizes {
+            let px = super::pixels(n);
+            // BMP-style entry: header, bottom-up straight-alpha BGRA rows, then a 1-bit AND mask.
+            let mut d = Vec::new();
+            for v in [40u32, n as u32, (n * 2) as u32] {
+                d.extend_from_slice(&v.to_le_bytes());
+            }
+            d.extend_from_slice(&1u16.to_le_bytes());
+            d.extend_from_slice(&32u16.to_le_bytes());
+            d.extend_from_slice(&[0u8; 24]);
+            for y in (0..n).rev() {
+                for x in 0..n {
+                    let v = px[y * n + x];
+                    let a = (v >> 24) & 0xff;
+                    let un = |c: u32| if a == 0 { 0 } else { (c * 255 / a).min(255) as u8 };
+                    d.extend_from_slice(&[un(v & 0xff), un((v >> 8) & 0xff), un((v >> 16) & 0xff), a as u8]);
+                }
+            }
+            d.extend(std::iter::repeat_n(0u8, n.div_ceil(32) * 4 * n));
+            images.push((n, d));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0, 0, 1, 0]);
+        out.extend_from_slice(&(images.len() as u16).to_le_bytes());
+        let mut offset = 6 + 16 * images.len();
+        for (n, d) in &images {
+            let b = if *n >= 256 { 0 } else { *n as u8 };
+            out.extend_from_slice(&[b, b, 0, 0]);
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&32u16.to_le_bytes());
+            out.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(offset as u32).to_le_bytes());
+            offset += d.len();
+        }
+        for (_, d) in &images {
+            out.extend_from_slice(d);
+        }
+        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qalam.ico"), out).unwrap();
     }
 }
