@@ -218,6 +218,12 @@ unsafe fn caret_range(el: &IUIAutomationElement, tp: &IUIAutomationTextPattern) 
 fn do_sync(auto: &IUIAutomation, epoch: u64) {
     let read = (|| unsafe {
         let (el, tp) = focused_text(auto)?;
+        // Read-only (page text, sliders, players): not a text box, nothing to resume.
+        if let Ok(v) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            && v.CurrentIsReadOnly().is_ok_and(|b| b.as_bool())
+        {
+            return None;
+        }
         // Text selected: typing will replace it, nothing useful to read.
         if let Ok(sel) = tp.GetSelection()
             && let Ok(first) = sel.GetElement(0)

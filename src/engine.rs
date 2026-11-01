@@ -580,7 +580,12 @@ impl Engine {
         self.history = chars[start..].to_vec();
         self.dirty = mid_word;
         self.last_fix = None;
+        // Restore context quietly: suggestions come back with the next key, not on a bare click
+        // (browsers report a caret in page text and sliders too). Keys typed since the click still count.
         self.refresh(ctx);
+        if typed.is_empty() {
+            self.hide_popup();
+        }
         true
     }
 
@@ -856,6 +861,17 @@ mod tests {
         assert!(!e.misspelled("انا"), "loose Arabic spelling is fine");
         assert!(e.misspelled("ثقصفغ"));
         assert_eq!(e.fixes_for("becuse", 3)[0], "because");
+    }
+
+    #[test]
+    fn seed_after_bare_click_stays_quiet() {
+        let mut e = engine();
+        e.reset(false);
+        let ep = e.epoch;
+        assert!(e.seed("I said becau", false, ep, Ctx::default()));
+        assert!(!e.popup_visible(), "no popup until a key is typed");
+        typ(&mut e, "s");
+        assert_eq!(e.suggestions[0].label, "because");
     }
 
     #[test]
