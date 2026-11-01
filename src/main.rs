@@ -589,6 +589,9 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
     unsafe {
         match msg {
             WM_TIMER if wparam.0 == TIMER_RELOAD => {
+                // Re-check the front window: a missed or out-of-order focus event must not leave
+                // qalam switched off (e.g. "fullscreen" stuck on after Alt-Tab).
+                update_fullscreen(GetForegroundWindow());
                 let (cm, sm, rm) =
                     (mtime(&config::config_path()), mtime(&config::secrets_path()), mtime(&config::replacements_path()));
                 let changed = UI.with_borrow_mut(|ui| {
@@ -1155,7 +1158,21 @@ fn is_fullscreen(hwnd: HWND) -> bool {
             return false;
         }
         let class = class_name(hwnd);
-        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Windows.UI.Core.CoreWindow") {
+        // Desktop and shell surfaces (Alt-Tab switcher, Start, task view) cover the screen but aren't games.
+        if matches!(
+            class.as_str(),
+            "Progman"
+                | "WorkerW"
+                | "Shell_TrayWnd"
+                | "Shell_SecondaryTrayWnd"
+                | "Windows.UI.Core.CoreWindow"
+                | "XamlExplorerHostIslandWindow"
+                | "ForegroundStaging"
+                | "MultitaskingViewFrame"
+                | "TaskSwitcherWnd"
+                | "Shell_SystemDialog"
+                | "Shell_SystemDim"
+        ) {
             return false;
         }
         // Maximized windows overhang the monitor edges (and cover it fully with an auto-hide taskbar).
@@ -1184,7 +1201,7 @@ fn update_fullscreen(hwnd: HWND) {
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let fs = on && pid != std::process::id() && is_fullscreen(hwnd);
     if s.fullscreen.swap(fs, Ordering::Relaxed) != fs {
-        dlog(|| format!("fullscreen={fs}"));
+        dlog(|| format!("fullscreen={fs} ({} {})", process_name(hwnd).unwrap_or_default(), class_name(hwnd)));
         lock(&s.engine).reset(false);
         refresh_popup();
     }
