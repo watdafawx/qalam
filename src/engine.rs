@@ -97,6 +97,8 @@ pub struct Engine {
     pub epoch: u64,
     /// Second opinion from the OS spell checker: true = the word is spelled right (don't fix or underline it).
     pub system_knows: Option<Box<dyn Fn(&str, Lang) -> bool + Send>>,
+    /// The UI couldn't place the popup (no caret): keys must not pick suggestions nobody can see.
+    pub popup_off_screen: bool,
 }
 
 fn is_word_char(c: char) -> bool {
@@ -128,6 +130,7 @@ impl Engine {
             flash: None,
             epoch: 0,
             system_knows: None,
+            popup_off_screen: false,
         };
         e.set_config(cfg, secrets);
         e
@@ -247,7 +250,7 @@ impl Engine {
     }
 
     pub fn popup_visible(&self) -> bool {
-        !self.suggestions.is_empty()
+        !self.suggestions.is_empty() && !self.popup_off_screen
     }
 
     /// Forget the current context (click, focus change, shortcut...).

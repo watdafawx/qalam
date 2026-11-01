@@ -110,7 +110,8 @@ pub struct Shared {
     pub sender: Mutex<Sender<Vec<Out>>>,
     pub popup_hwnd: AtomicIsize,
     /// Screen rects of the suggestions currently shown, for mouse clicks.
-    pub popup_items: Mutex<Vec<RECT>>,
+    /// What's on screen in the popup: its frame and each item's box + label (screen pixels).
+    pub popup_items: Mutex<PopupItems>,
     pub password: AtomicBool,
     pub disabled: AtomicBool,
     /// Foreground app is in replacements_only_apps (terminals): text replacement only.
@@ -163,6 +164,12 @@ fn class_name(h: HWND) -> String {
     let mut buf = [0u16; 128];
     let n = unsafe { GetClassNameW(h, &mut buf) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+#[derive(Default)]
+pub struct PopupItems {
+    pub frame: RECT,
+    pub items: Vec<(RECT, String)>,
 }
 
 pub fn shared() -> &'static Shared {
@@ -266,7 +273,7 @@ fn main() {
         engine: Mutex::new(engine),
         sender: Mutex::new(send::spawn()),
         popup_hwnd: AtomicIsize::new(0),
-        popup_items: Mutex::new(Vec::new()),
+        popup_items: Mutex::new(PopupItems::default()),
         password: AtomicBool::new(false),
         disabled: AtomicBool::new(false),
         replacements_only: AtomicBool::new(false),
@@ -856,7 +863,7 @@ unsafe fn update_popup(hwnd: HWND) {
         };
         let s = shared();
         if view.labels.is_empty() || s.paused.load(Ordering::Relaxed) || s.disabled.load(Ordering::Relaxed) {
-            lock(&s.popup_items).clear();
+            *lock(&s.popup_items) = PopupItems::default();
             let _ = ShowWindow(hwnd, SW_HIDE);
             dlog(|| "popup hidden".into());
             return;
@@ -865,8 +872,9 @@ unsafe fn update_popup(hwnd: HWND) {
         let (caret, source) = caret::caret_rect();
         dlog(|| format!("popup caret source={source}"));
         // No text caret anywhere (games, canvases): don't pop up over them.
+        lock(&s.engine).popup_off_screen = source == "mouse";
         if source == "mouse" {
-            lock(&s.popup_items).clear();
+            *lock(&s.popup_items) = PopupItems::default();
             let _ = ShowWindow(hwnd, SW_HIDE);
             return;
         }
@@ -918,7 +926,14 @@ unsafe fn update_popup(hwnd: HWND) {
 
         {
             let mut items = lock(&s.popup_items);
-            *items = rects.iter().map(|r| RECT { left: r.left + left, top: r.top + top, right: r.right + left, bottom: r.bottom + top }).collect();
+            *items = PopupItems {
+                frame: RECT { left, top, right: left + width, bottom: top + height },
+                items: rects
+                    .iter()
+                    .zip(&view.labels)
+                    .map(|(r, l)| (RECT { left: r.left + left, top: r.top + top, right: r.right + left, bottom: r.bottom + top }, l.clone()))
+                    .collect(),
+            };
         }
         dlog(|| {
             format!(

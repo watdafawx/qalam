@@ -251,8 +251,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             if m.dwExtraInfo != MAGIC {
                 match msg {
                     WM_LBUTTONDOWN => {
-                        if let Some(i) = hit_popup(m.pt) {
-                            run("click popup", |e, ctx| e.accept(i, ctx));
+                        if let Some(label) = hit_popup(m.pt) {
+                            // Pick by the label that was on screen (the list may have changed since it was drawn).
+                            // A click on the popup's padding is swallowed too, so it never lands in the app.
+                            if let Some(label) = label {
+                                run("click popup", |e, ctx| match e.suggestions.iter().position(|s| s.label == label) {
+                                    Some(i) => e.accept(i, ctx),
+                                    None => Action::Swallow,
+                                });
+                            }
                             EAT_MOUSE_UP.set(true);
                             return LRESULT(1);
                         }
@@ -276,7 +283,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
-fn hit_popup(p: POINT) -> Option<usize> {
-    let items = lock(&shared().popup_items);
-    items.iter().position(|r| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom)
+/// Click on the popup? Some(Some(label)) on an item, Some(None) on its padding, None elsewhere.
+fn hit_popup(p: POINT) -> Option<Option<String>> {
+    let pi = lock(&shared().popup_items);
+    let inside = |r: &windows::Win32::Foundation::RECT| p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
+    if !inside(&pi.frame) {
+        return None;
+    }
+    Some(pi.items.iter().find(|(r, _)| inside(r)).map(|(_, l)| l.clone()))
 }
