@@ -571,11 +571,13 @@ impl Engine {
             return false;
         }
         let line = before_caret.rsplit(['\n', '\r', '\u{2029}', '\u{000B}']).next().unwrap_or("");
-        let typed: String = self.history.iter().collect();
-        if !line.ends_with(&typed) {
+        // Drop invisible filler: object placeholders (U+FFFC) and the zero-width
+        // spaces editors like Discord's (Slate) keep in empty lines and around emoji.
+        let chars: Vec<char> = line.chars().filter(|c| !matches!(c, '\u{FFFC}' | '\u{FEFF}' | '\u{200B}' | '\u{2060}')).collect();
+        let typed_nothing = self.history.is_empty();
+        if !chars.ends_with(&self.history) {
             return false;
         }
-        let chars: Vec<char> = line.chars().filter(|&c| c != '\u{FFFC}').collect();
         let start = chars.len().saturating_sub(HISTORY_MAX);
         self.history = chars[start..].to_vec();
         self.dirty = mid_word;
@@ -583,7 +585,7 @@ impl Engine {
         // Restore context quietly: suggestions come back with the next key, not on a bare click
         // (browsers report a caret in page text and sliders too). Keys typed since the click still count.
         self.refresh(ctx);
-        if typed.is_empty() {
+        if typed_nothing {
             self.hide_popup();
         }
         true
@@ -905,6 +907,17 @@ mod tests {
         let ep = e.epoch;
         assert!(e.seed("first line\nte", false, ep, Ctx::default()));
         assert!(matches!(last(&mut e, "h "), Action::Send(_)));
+    }
+
+    #[test]
+    fn seed_ignores_zero_width_filler() {
+        // Discord's editor keeps a U+FEFF in an empty line; it must not glue onto the next word.
+        let mut e = engine();
+        e.reset(true);
+        let ep = e.epoch;
+        assert!(e.seed("old message\n\u{FEFF}", false, ep, Ctx::default()));
+        typ(&mut e, "becau");
+        assert_eq!(e.suggestions[0].label, "because");
     }
 
     #[test]
