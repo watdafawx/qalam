@@ -448,6 +448,7 @@ fn save_learned(force: bool) {
         if !eng.learned.dirty && !force {
             return;
         }
+        eng.learned.prune();
         eng.learned.dirty = false;
         eng.learned.serialize()
     };

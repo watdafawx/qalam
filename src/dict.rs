@@ -107,45 +107,187 @@ pub struct Dict {
     /// Built-in typo -> fix (English only).
     pub typos: HashMap<String, String>,
     alphabet: Vec<char>,
+    /// English only: what real words look like, to be suspicious of keysmash.
+    shape: Option<Shape>,
 }
 
 /// Personal word counts, persisted to learned.txt. Keys are `norm_key`s.
-#[derive(Default, Clone)]
+///
+/// File format: `word count lastday` lines for learned words, then `?word count days lastday`
+/// lines for the probation list. Days are whole days since the Unix epoch.
+#[derive(Clone)]
 pub struct Learned {
     pub counts: HashMap<String, u32>,
+    /// Day each learned word was last used (missing = today, for files from older versions).
+    seen: HashMap<String, u32>,
+    /// Unknown words on probation: only learned after showing up on several different days.
+    pending: HashMap<String, Pending>,
+    /// "Today", overridable so tests can move the clock.
+    pub day: u32,
     pub dirty: bool,
 }
 
+#[derive(Clone, Copy)]
+struct Pending {
+    count: u32,
+    days: u32,
+    last: u32,
+}
+
+/// Learned words used once and not seen for this many days are forgotten.
+const STALE_DAYS: u32 = 30;
+/// Probation entries that never made it are dropped after this many days of silence.
+const PENDING_DAYS: u32 = 14;
+
+fn today() -> u32 {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    (secs / 86_400) as u32
+}
+
+impl Default for Learned {
+    fn default() -> Self {
+        Learned { counts: HashMap::new(), seen: HashMap::new(), pending: HashMap::new(), day: today(), dirty: false }
+    }
+}
+
 impl Learned {
+    /// Only WASD keys, 3+ long ("wdwdw", "swwd"). Real words like "was"/"sad" also match,
+    /// so callers must check the dictionary first.
+    pub fn is_wasd(w: &str) -> bool {
+        w.chars().count() >= 3 && w.chars().all(|c| matches!(c, 'w' | 'a' | 's' | 'd'))
+    }
+    /// Key-held junk that must never be learned: 3+ identical letters in a row ("wwwww", "aaaaaw").
+    pub fn is_junk(w: &str) -> bool {
+        let mut run = 1;
+        let mut prev = None;
+        for c in w.chars() {
+            run = if prev == Some(c) { run + 1 } else { 1 };
+            if run >= 3 && c.is_alphabetic() {
+                return true;
+            }
+            prev = Some(c);
+        }
+        false
+    }
     pub fn get(&self, w: &str) -> u32 {
         self.counts.get(&norm_key(w)).copied().unwrap_or(0)
     }
     pub fn bump(&mut self, w: &str) {
-        *self.counts.entry(norm_key(w)).or_insert(0) += 1;
+        let k = norm_key(w);
+        self.pending.remove(&k);
+        self.seen.insert(k.clone(), self.day);
+        *self.counts.entry(k).or_insert(0) += 1;
         self.dirty = true;
+    }
+    /// A typed word. Dictionary words and already-learned words count straight away; anything else goes
+    /// on probation and is only learned once seen on `days_needed` different days.
+    pub fn note(&mut self, w: &str, known: bool, days_needed: u32) {
+        let k = norm_key(w);
+        if known || self.counts.contains_key(&k) {
+            self.bump(&k);
+            return;
+        }
+        let day = self.day;
+        let p = self.pending.entry(k.clone()).or_insert(Pending { count: 0, days: 0, last: day });
+        p.count += 1;
+        if p.count == 1 || p.last != day {
+            p.days += 1;
+            p.last = day;
+        }
+        self.dirty = true;
+        if p.days >= days_needed {
+            let count = p.count;
+            self.pending.remove(&k);
+            self.counts.insert(k.clone(), count);
+            self.seen.insert(k, day);
+        }
     }
     /// Mark a word as definitely wanted (undid an autocorrect, "Add to dictionary").
     pub fn accept(&mut self, w: &str) {
-        let c = self.counts.entry(norm_key(w)).or_insert(0);
+        let k = norm_key(w);
+        self.pending.remove(&k);
+        self.seen.insert(k.clone(), self.day);
+        let c = self.counts.entry(k).or_insert(0);
         *c = (*c).max(LEARN_SUGGEST_MIN + 1);
         self.dirty = true;
     }
+    /// Forget stale one-off words and abandoned probation entries. Call before saving.
+    pub fn prune(&mut self) {
+        let day = self.day;
+        let before = self.counts.len() + self.pending.len();
+        let seen = &self.seen;
+        self.counts.retain(|w, &mut c| c > 1 || day.saturating_sub(seen.get(w).copied().unwrap_or(day)) <= STALE_DAYS);
+        let counts = &self.counts;
+        self.seen.retain(|w, _| counts.contains_key(w));
+        self.pending.retain(|_, p| day.saturating_sub(p.last) <= PENDING_DAYS);
+        if self.counts.len() + self.pending.len() != before {
+            self.dirty = true;
+        }
+    }
     pub fn parse(text: &str) -> Self {
-        let mut counts = HashMap::new();
+        let mut l = Learned::default();
         for line in text.lines() {
             let mut it = line.split_whitespace();
-            if let (Some(w), Some(c)) = (it.next(), it.next())
-                && let Ok(c) = c.parse()
-            {
-                counts.insert(w.to_string(), c);
+            let (Some(w), Some(a)) = (it.next(), it.next()) else { continue };
+            let Ok(a) = a.parse::<u32>() else { continue };
+            if let Some(w) = w.strip_prefix('?') {
+                let days = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+                let last = it.next().and_then(|x| x.parse().ok()).unwrap_or(l.day);
+                l.pending.insert(w.to_string(), Pending { count: a, days, last });
+            } else {
+                if let Some(d) = it.next().and_then(|x| x.parse().ok()) {
+                    l.seen.insert(w.to_string(), d);
+                }
+                l.counts.insert(w.to_string(), a);
             }
         }
-        Learned { counts, dirty: false }
+        l
     }
     pub fn serialize(&self) -> String {
         let mut v: Vec<_> = self.counts.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        v.iter().map(|(w, c)| format!("{w} {c}\n")).collect()
+        let mut out: String =
+            v.iter().map(|(w, c)| format!("{w} {c} {}\n", self.seen.get(*w).copied().unwrap_or(self.day))).collect();
+        let mut p: Vec<_> = self.pending.iter().collect();
+        p.sort_by(|a, b| b.1.count.cmp(&a.1.count).then(a.0.cmp(b.0)));
+        out.extend(p.iter().map(|(w, p)| format!("?{w} {} {} {}\n", p.count, p.days, p.last)));
+        out
+    }
+}
+
+/// Letter-pair model of what words in this language look like, built from the word list.
+/// Weak on its own (short words overlap), so it only raises the bar for promotion.
+struct Shape {
+    pair: HashMap<(char, char), u32>,
+    from: HashMap<char, u32>,
+}
+
+/// Average log-probability per letter pair below which a word looks unlike the dictionary (~bottom 1-2%).
+const SHAPE_POOR: f32 = -3.8;
+
+impl Shape {
+    fn build(keys: impl Iterator<Item = String>) -> Self {
+        let (mut pair, mut from) = (HashMap::new(), HashMap::new());
+        for k in keys {
+            let s: Vec<char> = std::iter::once('^').chain(k.chars()).chain(std::iter::once('$')).collect();
+            for w in s.windows(2) {
+                *pair.entry((w[0], w[1])).or_insert(0u32) += 1;
+                *from.entry(w[0]).or_insert(0u32) += 1;
+            }
+        }
+        Shape { pair, from }
+    }
+    fn score(&self, w: &str) -> f32 {
+        let s: Vec<char> = std::iter::once('^').chain(w.chars()).chain(std::iter::once('$')).collect();
+        let sum: f32 = s
+            .windows(2)
+            .map(|p| {
+                let n = self.pair.get(&(p[0], p[1])).copied().unwrap_or(0) as f32;
+                let t = self.from.get(&p[0]).copied().unwrap_or(0) as f32;
+                ((n + 0.1) / (t + 2.8)).ln()
+            })
+            .sum();
+        sum / (s.len() - 1) as f32
     }
 }
 
@@ -236,7 +378,8 @@ impl Dict {
         let mut alphabet: Vec<char> = entries.iter().flat_map(|e| e.key.chars()).collect();
         alphabet.sort_unstable();
         alphabet.dedup();
-        Dict { lang, entries, index, loose, typos, alphabet }
+        let shape = (lang == Lang::En).then(|| Shape::build(entries.iter().map(|e| e.key.clone())));
+        Dict { lang, entries, index, loose, typos, alphabet, shape }
     }
 
     #[cfg(test)]
@@ -249,6 +392,11 @@ impl Dict {
     /// Exact dictionary word (ignoring case and diacritics).
     pub fn contains(&self, w: &str) -> bool {
         self.index.contains_key(&norm_key(w))
+    }
+
+    /// Doesn't look like a word of this language at all (keysmash, consonant soup). English only.
+    pub fn shape_poor(&self, w: &str) -> bool {
+        self.shape.as_ref().is_some_and(|s| s.score(&norm_key(w)) < SHAPE_POOR)
     }
 
     /// Plausibly a real word: exact, or for Arabic a loose spelling or a known stem with common prefixes/suffixes.
@@ -424,6 +572,59 @@ mod tests {
         // Prefix + suffix on a known stem.
         assert!(d.known("وكتابها") || d.known("والكتاب"));
         assert!(!d.known("ثقصفغ"));
+    }
+
+    #[test]
+    fn junk_is_not_learnable() {
+        for w in ["wwwww", "aaaaaw", "ewwwa"] {
+            assert!(Learned::is_junk(w), "{w}");
+        }
+        for w in ["was", "add", "sad", "hello", "it'll", "good", "shittyy"] {
+            assert!(!Learned::is_junk(w), "{w}");
+        }
+        assert!(Learned::is_wasd("wdwdw") && Learned::is_wasd("swwd") && !Learned::is_wasd("wa"));
+    }
+
+    #[test]
+    fn unknown_words_need_several_days() {
+        let mut l = Learned::default();
+        for _ in 0..5 {
+            l.note("hopperd", false, 2);
+        }
+        assert_eq!(l.get("hopperd"), 0, "same-day repeats stay on probation");
+        l.day += 1;
+        l.note("hopperd", false, 2);
+        assert_eq!(l.get("hopperd"), 6, "second day promotes, keeping the count");
+        l.note("the", true, 0);
+        assert_eq!(l.get("the"), 1, "dictionary words count immediately");
+    }
+
+    #[test]
+    fn learned_file_roundtrip_and_decay() {
+        let mut l = Learned::default();
+        l.note("keeper", true, 0);
+        l.note("keeper", true, 0);
+        l.note("oneoff", true, 0);
+        l.note("maybe", false, 2);
+        let mut l2 = Learned::parse(&l.serialize());
+        assert_eq!((l2.get("keeper"), l2.get("oneoff"), l2.get("maybe")), (2, 1, 0));
+        l2.day += 40;
+        l2.prune();
+        assert_eq!((l2.get("keeper"), l2.get("oneoff")), (2, 0), "old one-offs are forgotten, repeats stay");
+        assert!(!l2.serialize().contains("maybe"), "abandoned probation dropped");
+        // Files from before day tracking still load.
+        assert_eq!(Learned::parse("hello 7\n").get("hello"), 7);
+    }
+
+    #[test]
+    fn shape_flags_keysmash() {
+        let d = Dict::english();
+        for w in ["hopperd", "github", "deepseek", "config", "qalam"] {
+            assert!(!d.shape_poor(w), "{w}");
+        }
+        for w in ["wdwdw", "wwwww", "vvvvvvwwd"] {
+            assert!(d.shape_poor(w), "{w}");
+        }
     }
 
     #[test]

@@ -520,12 +520,23 @@ impl Engine {
         Action::Pass
     }
 
+    /// WASD-only keysmash that isn't a real word ("wdwdw" yes, "was"/"sad" no).
+    fn wasd_smash(&self, w: &str) -> bool {
+        Learned::is_wasd(w) && !self.dict_for(w, Ctx::default()).is_some_and(|d| d.known(w))
+    }
+
     fn learn(&mut self, word: &str) {
         let w = norm_key(word);
         let plain = w.chars().all(|c| c.is_alphabetic() || c == '\'');
         let arabizi_word = self.cfg.general.arabizi && arabizi::looks_like_arabizi(&w);
-        if w.chars().count() >= 2 && (plain || arabizi_word) {
-            self.learned.bump(&w);
+        if w.chars().count() >= 2 && (plain || arabizi_word) && !Learned::is_junk(&w) && !self.forced_typo(&w) && !self.wasd_smash(&w) {
+            let (known, days) = match self.dict_for(&w, Ctx::default()) {
+                Some(d) if d.known(&w) => (true, 0),
+                // Odd-looking unknown words need one more day of evidence (arabizi has its own spelling rules).
+                Some(d) if !arabizi_word && d.shape_poor(&w) => (false, 3),
+                _ => (false, 2),
+            };
+            self.learned.note(&w, known, days);
         }
     }
 
